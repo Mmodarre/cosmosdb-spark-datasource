@@ -1,10 +1,10 @@
 """Silver: current state per document (SCD Type 1) with hard deletes applied.
 
-Ordered by ``struct(_source_rank, _ts, lsn)``. ``_source_rank`` is 0 for snapshot rows and 1 for
-change rows, so any change outranks the snapshot copy of the same document whatever the
-timestamps. A document changed after P0 has all of those changes in the feed; the snapshot only
-matters for documents with no change after P0. For deletes the data source sets ``_ts`` to the
-delete's ``crts``.
+Ordered by ``struct(_source_rank, lsn, lsn_seq)``. ``_source_rank`` is 0 for snapshot rows and 1 for
+change rows, so any change outranks the snapshot copy of the same document. A document changed after
+P0 has all of those changes in the feed, in feed order: ``lsn``, then ``lsn_seq`` for versions that
+share an LSN (a transactional batch, or a multi-region-write conflict's delete and create). The
+snapshot only matters for documents with no change after P0.
 
 Bronze is append-only and holds the snapshot before any change, so rebuilding this table from
 bronze gives the same result.
@@ -33,8 +33,8 @@ dp.create_auto_cdc_flow(
     target=SILVER,
     source="orders_changes_avad_ranked",
     keys=["pk", "id"],
-    sequence_by=F.struct("_source_rank", "_ts", "lsn"),
+    sequence_by=F.struct("_source_rank", "lsn", "lsn_seq"),
     apply_as_deletes=F.expr("operation = 'delete'"),
     stored_as_scd_type=1,
-    except_column_list=["_source_rank", "crts", "ttl_expired", "feed_range", "_ingested_at"],
+    except_column_list=["_source_rank", "lsn_seq", "crts", "ttl_expired", "feed_range", "_ingested_at"],
 )

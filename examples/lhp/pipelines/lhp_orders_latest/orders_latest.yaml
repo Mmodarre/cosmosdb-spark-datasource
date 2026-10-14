@@ -60,6 +60,6 @@ actions:
       comment: "Latest version of each orders document (SCD1; deletes not captured)"
       cdc_config:
         keys: ["pk", "id"]
-        sequence_by: ["_ts", "lsn"]
+        sequence_by: ["lsn", "lsn_seq"]
         scd_type: 1
-        except_column_list: ["operation", "crts", "ttl_expired", "feed_range", "_ingested_at"]
+        except_column_list: ["operation", "lsn_seq", "crts", "ttl_expired", "feed_range", "_ingested_at"]

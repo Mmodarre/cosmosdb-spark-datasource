@@ -211,9 +211,20 @@ def test_default_schemas_produce_arrow_compatible_rows() -> None:
     arrow_ok([row], batch_schema())
     cf = builder(change_feed_schema(), stream=True)
     row = cf.build(
-        RecordView(None, id="a", pk="p", operation="delete", ts=9, lsn=10, crts=9, ttl_expired=True, feed_range="-FF")
+        RecordView(
+            None,
+            id="a",
+            pk="p",
+            operation="delete",
+            ts=9,
+            lsn=10,
+            lsn_seq=1,
+            crts=9,
+            ttl_expired=True,
+            feed_range="-FF",
+        )
     )
-    assert row == ("a", "p", "delete", 9, 10, 9, True, None, "-FF")
+    assert row == ("a", "p", "delete", 9, 10, 1, 9, True, None, "-FF")
     arrow_ok([row], change_feed_schema())
 
 

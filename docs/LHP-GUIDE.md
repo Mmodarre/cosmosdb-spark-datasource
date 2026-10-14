@@ -209,22 +209,22 @@ actions:
       table: orders_avad
       cdc_config:
         keys: ["pk", "id"]
-        sequence_by: ["_source_rank", "_ts", "lsn"]
+        sequence_by: ["_source_rank", "lsn", "lsn_seq"]
         scd_type: 1
         apply_as_deletes: "operation = 'delete'"
-        except_column_list: ["_source_rank", "crts", "ttl_expired", "feed_range", "_ingested_at"]
+        except_column_list: ["_source_rank", "lsn_seq", "crts", "ttl_expired", "feed_range", "_ingested_at"]
 ```
 
 The generated code has `.option("initial_snapshot", "true")`, an append flow into bronze, the SQL
 transform over `stream(v_orders_changes_avad)`, and
-`dp.create_auto_cdc_flow(..., sequence_by=struct("_source_rank", "_ts", "lsn"), apply_as_deletes="operation = 'delete'")`.
+`dp.create_auto_cdc_flow(..., sequence_by=struct("_source_rank", "lsn", "lsn_seq"), apply_as_deletes="operation = 'delete'")`.
 Do not add a separate `once: true` snapshot flow instead of `initial_snapshot`: it would race the
 stream ([MODES.md](MODES.md#why-not-a-separate-one-time-snapshot-flow-with-avad)).
 
 ### `lhp_orders_latest`: LatestVersion from `Beginning` to SCD1
 
 The same shape without the snapshot and the rank: the load sets `change_feed_mode: LatestVersion`
-and `start_from: Beginning`, and the CDC write uses `sequence_by: ["_ts", "lsn"]`, no
+and `start_from: Beginning`, and the CDC write uses `sequence_by: ["lsn", "lsn_seq"]`, no
 `apply_as_deletes`, and `operation` in `except_column_list`. Deletes are not in this feed. On a
 large container add `max_items_per_trigger: "<LSN budget>"` to the load options, so the first
 update commits in several micro-batches.

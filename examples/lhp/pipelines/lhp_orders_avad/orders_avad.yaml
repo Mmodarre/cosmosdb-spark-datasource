@@ -52,8 +52,8 @@ actions:
       table: orders_changes_avad
     target: v_orders_changes_avad
 
-  # Every change row outranks every snapshot row of the same key, then _ts (for deletes the delete's
-  # crts), then lsn for ties within a second (MODES.md, "Ordering").
+  # Every change row outranks every snapshot row of the same key, then the feed order: lsn, and
+  # lsn_seq for versions that share an LSN (MODES.md, "Ordering").
   - name: rank_orders_changes_avad
     type: transform
     transform_type: sql
@@ -77,7 +77,7 @@ actions:
       comment: "Current state of each orders document (SCD1) with hard deletes applied"
       cdc_config:
         keys: ["pk", "id"]
-        sequence_by: ["_source_rank", "_ts", "lsn"]
+        sequence_by: ["_source_rank", "lsn", "lsn_seq"]
         scd_type: 1
         apply_as_deletes: "operation = 'delete'"
-        except_column_list: ["_source_rank", "crts", "ttl_expired", "feed_range", "_ingested_at"]
+        except_column_list: ["_source_rank", "lsn_seq", "crts", "ttl_expired", "feed_range", "_ingested_at"]

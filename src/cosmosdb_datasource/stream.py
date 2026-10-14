@@ -33,6 +33,7 @@ batch per AvailableNow run, so the first run still ends after the snapshot.
 
 from __future__ import annotations
 
+import collections
 import logging
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -150,6 +151,7 @@ def _view(rec: ChangeRecord, feed_range: str) -> RecordView:
         operation=rec.operation,
         ts=rec.ts,
         lsn=rec.lsn,
+        lsn_seq=rec.lsn_seq,
         crts=rec.crts,
         ttl_expired=rec.ttl_expired,
         feed_range=feed_range,
@@ -454,8 +456,18 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
             ),
         )
         emitted = 0
+        group_lsn: int | None = None
+        group: collections.Counter[tuple[str | None, str | None]] = collections.Counter()
         for item in items:
-            row = builder.build(_view(to_change_record(item, mode, pk), partition.feed_range))
+            rec = to_change_record(item, mode, pk)
+            # The feed is in LSN order and a page holds whole LSN groups, so the versions of a document
+            # at one LSN are adjacent; pages of other partitions after a split hold other documents.
+            if rec.lsn != group_lsn:
+                group_lsn = rec.lsn
+                group.clear()
+            rec.lsn_seq = group[(rec.pk, rec.id)]
+            group[(rec.pk, rec.id)] += 1
+            row = builder.build(_view(rec, partition.feed_range))
             if row is not None:
                 emitted += 1
                 yield row

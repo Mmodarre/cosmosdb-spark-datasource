@@ -136,8 +136,8 @@ orders = (
 ```
 
 To merge snapshot and change rows into the current state, order the rows of each key `(pk, id)` by
-`struct(operation <> 'snapshot', _ts, lsn)` and keep the last one; a `delete` means the document is
-gone. In a Lakeflow pipeline that is one `create_auto_cdc_flow`:
+`struct(operation <> 'snapshot', lsn, lsn_seq)` and keep the last one; a `delete` means the document
+is gone. In a Lakeflow pipeline that is one `create_auto_cdc_flow`:
 
 ```python
 from pyspark import pipelines as dp
@@ -158,9 +158,9 @@ dp.create_auto_cdc_flow(
     target="orders_current",
     source="orders_bronze",
     keys=["pk", "id"],
-    sequence_by=struct((col("operation") != "snapshot").cast("int").alias("rank"), col("_ts"), col("lsn")),
+    sequence_by=struct((col("operation") != "snapshot").cast("int").alias("rank"), col("lsn"), col("lsn_seq")),
     apply_as_deletes=expr("operation = 'delete'"),
-    except_column_list=["operation", "crts", "ttl_expired", "feed_range"],
+    except_column_list=["operation", "lsn_seq", "crts", "ttl_expired", "feed_range"],
     stored_as_scd_type="1",
 )
 ```
@@ -258,6 +258,7 @@ Change-feed streams:
 | `operation` | STRING | `upsert` (LatestVersion); `create`, `replace` or `delete` (AllVersionsAndDeletes); `snapshot` for initial-snapshot rows |
 | `_ts` | BIGINT | Document `_ts`; for deletes, the delete's `crts` |
 | `lsn` | BIGINT | Change LSN, monotonic per physical partition; `0` for snapshot rows |
+| `lsn_seq` | INT | Position of the change among the changes of the same document with the same LSN, in feed order (`0`, `1`, ...); `0` for most rows. Several versions of one document share an LSN in a transactional batch, and a multi-region-write conflict arrives as a delete and a create at one LSN. |
 | `crts` | BIGINT | Conflict-resolution timestamp (AllVersionsAndDeletes; null otherwise) |
 | `ttl_expired` | BOOLEAN | Delete caused by TTL expiry (AllVersionsAndDeletes) |
 | `body` | STRING | Document JSON (null for deletes) |
@@ -295,7 +296,7 @@ With `.schema(...)` each column is resolved as follows:
 - **Virtual columns**: `pk`, `feed_range`, `body` (or the `raw_json_column` name) and the
   corrupt-record column. `body` declared as STRING holds the JSON text; declared as a STRUCT or
   MAP it holds the parsed document. Change-feed streams also have `id`, `_ts`, `operation`, `lsn`,
-  `crts` and `ttl_expired`; snapshot streams have `snapshot_ts`.
+  `lsn_seq`, `crts` and `ttl_expired`; snapshot streams have `snapshot_ts`.
 - **Every other column** is a top-level document property, matched by exact name, then
   case-insensitively. STRUCT, ARRAY and MAP types are converted recursively.
 - **Missing properties** are null.
@@ -429,10 +430,12 @@ Entra ID works.
 ### Keys and ordering for CDC
 
 - **Keys**: `["pk", "id"]`.
-- **Ordering**: `struct("_ts", "lsn")`; `lsn` breaks ties within a second. With `initial_snapshot`:
-  `struct(operation <> 'snapshot', _ts, lsn)`, so that every change outranks every snapshot row.
-- **Deletes** (`AllVersionsAndDeletes`): `apply_as_deletes = expr("operation = 'delete'")`. For
-  delete rows `_ts` is the delete's `crts`, so the ordering column is never null.
+- **Ordering**: `struct("lsn", "lsn_seq")`, the order of the change feed. With `initial_snapshot`:
+  `struct(operation <> 'snapshot', lsn, lsn_seq)`, so that every change outranks every snapshot row.
+  `_ts` and `crts` do not order versions that share an LSN, and on multi-region-write accounts `_ts`
+  can be older than the conflict resolution it survived (see
+  [docs/MODES.md](docs/MODES.md#ordering-sequence_by)).
+- **Deletes** (`AllVersionsAndDeletes`): `apply_as_deletes = expr("operation = 'delete'")`.
 
 ### Initial snapshot
 

@@ -195,6 +195,10 @@ class ChangeRecord:
     crts: int | None
     ttl_expired: bool
     doc: dict[str, Any] | None
+    # Position among the changes of the same document with the same LSN, in feed order: several
+    # versions of one document share an LSN in a transactional batch, and a multi-region-write
+    # conflict arrives as a delete and a create at one LSN.
+    lsn_seq: int = 0
 
 
 def _as_int(value: Any) -> int | None:

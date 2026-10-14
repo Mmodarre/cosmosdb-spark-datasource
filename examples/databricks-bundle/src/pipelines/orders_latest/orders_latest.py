@@ -1,7 +1,7 @@
 """Silver: latest state per document (SCD Type 1) from the LatestVersion bronze table.
 
-Ordered by ``struct(_ts, lsn)``: the server timestamp in seconds, then the change LSN to break ties
-within a second. Deletes never arrive in this mode, so deleted documents stay in the table.
+Ordered by ``struct(lsn, lsn_seq)``, the order of the change feed. Deletes never arrive in this mode,
+so deleted documents stay in the table.
 """
 
 from pyspark import pipelines as dp
@@ -27,7 +27,7 @@ dp.create_auto_cdc_flow(
     target=SILVER,
     source="orders_changes_latest_stream",
     keys=["pk", "id"],
-    sequence_by=F.struct("_ts", "lsn"),
+    sequence_by=F.struct("lsn", "lsn_seq"),
     stored_as_scd_type=1,
-    except_column_list=["operation", "crts", "ttl_expired", "feed_range", "_ingested_at"],
+    except_column_list=["operation", "lsn_seq", "crts", "ttl_expired", "feed_range", "_ingested_at"],
 )

@@ -202,12 +202,13 @@ class FakeCosmosStore:
             self.save()
             return version
 
-    def delete(self, pk: Any, doc_id: str, *, ttl_expired: bool = False) -> Version:
+    def delete(self, pk: Any, doc_id: str, *, ttl_expired: bool = False, same_lsn_as_previous: bool = False) -> Version:
         with _LOCK:
             key = self._epk(pk)
             part = self._owner(key)
             self.clock += self.clock_step
-            part.lsn += 1
+            if not same_lsn_as_previous:
+                part.lsn += 1
             version = Version(part.lsn, "delete", doc_id, pk, key, self.clock, None, ttl_expired)
             part.log.append(version)
             self.save()

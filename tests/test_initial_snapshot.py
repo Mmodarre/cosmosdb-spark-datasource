@@ -66,7 +66,7 @@ def live_ids(store) -> list[str]:
 def merge(rows: list[dict], sabotage: str | None = None) -> dict[tuple, dict]:
     """Apply the merge rule documented in the README.
 
-    Latest row per (pk, id) by ``struct(operation <> 'snapshot', _ts, lsn)``; deletes mean absence.
+    Latest row per (pk, id) by ``struct(operation <> 'snapshot', lsn, lsn_seq)``; deletes mean absence.
     """
     if sabotage == "drop_snapshot":
         rows = [r for r in rows if r["operation"] != "snapshot"]
@@ -77,7 +77,7 @@ def merge(rows: list[dict], sabotage: str | None = None) -> dict[tuple, dict]:
         change = r["operation"] != "snapshot"
         if sabotage == "snapshot_wins":
             change = not change
-        return (change, r["_ts"], r["lsn"])
+        return (change, r["lsn"], r["lsn_seq"])
 
     best: dict[tuple, dict] = {}
     for r in rows:
@@ -132,6 +132,7 @@ def test_snapshot_row_schema_and_values(make_store) -> None:
         "operation": "snapshot",
         "_ts": version.ts,
         "lsn": 0,
+        "lsn_seq": 0,
         "crts": None,
         "ttl_expired": False,
         "body": row["body"],
