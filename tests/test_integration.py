@@ -497,6 +497,34 @@ def test_stream_all_versions_and_deletes(make_container) -> None:
     )
 
 
+@requires("requires_avad")
+def test_partition_key_rendering_matches_across_row_types(make_container) -> None:
+    """Delete rows carry the pk of the document's other rows: numbers above 2**53, JSON null and undefined."""
+    from azure.cosmos.partition_key import NonePartitionKeyValue
+
+    name, container = make_container()
+    h = StreamHarness(options(name, change_feed_mode="AllVersionsAndDeletes"))
+    h.start()
+    h.run_batch()
+    docs = [{"id": "big", "pk": 2**53 + 1}, {"id": "max", "pk": 2**63 - 1}, {"id": "same", "pk": None}, {"id": "same"}]
+    for doc in docs:
+        container.upsert_item(doc)
+    batch_rows, _ = run_batch(options(name))
+    container.delete_item("big", partition_key=2**53 + 1)
+    container.delete_item("max", partition_key=2**63 - 1)
+    container.delete_item("same", partition_key=None)
+    container.delete_item("same", partition_key=NonePartitionKeyValue)
+    time.sleep(2)
+    rows = [dict(zip(h.schema.fieldNames(), r, strict=True)) for r in h.run_until_idle()]
+    by_op: dict[str, list[tuple[Any, Any]]] = {}
+    for r in rows:
+        by_op.setdefault(r["operation"], []).append((r["pk"], r["id"]))
+    expected = sorted([(str(2**53), "big"), (str(2**63), "max"), ("null", "same"), (None, "same")], key=str)
+    assert sorted(by_op["create"], key=str) == expected
+    assert sorted(by_op["delete"], key=str) == expected
+    assert sorted(((r[1], r[0]) for r in batch_rows), key=str) == expected
+
+
 def _merge_latest(rows: list[dict[str, Any]]) -> dict[tuple[Any, Any], int]:
     """Pick the latest row per (pk, id) by ``struct(operation <> 'snapshot', _ts, lsn)``; a delete means absent."""
     best: dict[tuple[Any, Any], dict[str, Any]] = {}

@@ -244,7 +244,7 @@ Batch reads:
 | Column | Type | Content |
 |---|---|---|
 | `id` | STRING | Document id |
-| `pk` | STRING | Partition key value: the string itself, JSON for numbers and booleans (`123`, `true`), a compact JSON array for hierarchical keys (`["tenant1","user7"]`). Nested paths such as `/a/b` work. |
+| `pk` | STRING | Partition key value, rendered identically on every row of a document (see [Partition key rendering](#partition-key-rendering)). Nested paths such as `/a/b` work. |
 | `_ts` | BIGINT | Last-modified time (epoch seconds) |
 | `_etag` | STRING | Document etag |
 | `body` | STRING | The whole document as compact JSON, system properties included |
@@ -273,6 +273,20 @@ whenever a change-feed option (`change_feed_mode`, `start_from`, `max_items_per_
 `initial_snapshot`, `initial_snapshot_delay_seconds`) is set. A `readStream` without those options
 and without an explicit schema fails with an explanatory error, and so does a batch `read` with
 them.
+
+### Partition key rendering
+
+| Partition key value | `pk` |
+|---|---|
+| string | the string itself |
+| number | the IEEE double the service hashes, without a fraction if integral: `123`, `2.5`; `9007199254740993` renders as `9007199254740992`, because the service treats both as one logical partition and reports the double in delete metadata |
+| `true`, `false` | `true`, `false` |
+| JSON `null` | `null` |
+| undefined (the document has no such property) | NULL |
+| hierarchical key | a compact JSON array of the components, `{}` for an undefined component: `["tenant1",7]`, `["tenant1",{}]` |
+
+JSON null and undefined are different logical partitions on the service, so they render
+differently. A string that reads like another value (`"null"`, `"123"`) renders like that value.
 
 ### User-specified schemas
 
