@@ -119,7 +119,6 @@ def test_test_backend_hook_requires_env(monkeypatch: pytest.MonkeyPatch) -> None
         ({"account_key": KEY}, "key"),
         ({"tenant_id": "t", "client_id": "c", "client_secret": "s3cr3t-value"}, "service_principal"),
         ({"access_token": "tok-value-123"}, "access_token"),
-        ({"service_credential": "cosmos-cred"}, "service_credential"),
         ({"auth_type": "default"}, "default"),
     ],
 )
@@ -262,26 +261,16 @@ def test_partition_credential_fallback_failure_uses_shipped_token(monkeypatch: p
         gone.get_token("s")
 
 
-def test_service_credential_unavailable_outside_databricks() -> None:
-    with pytest.raises(CosmosAuthError, match="not available in this Python process") as info:
-        auth._service_credential_provider("cosmos-cred")
-    assert "auth_type=access_token" in str(info.value)
-
-
-def test_service_credential_uses_databricks_module(monkeypatch: pytest.MonkeyPatch) -> None:
-    import sys
-    import types
-
-    provider = _FakeCredential(token="uc-token")
-    module = types.ModuleType("databricks.service_credentials")
-    module.getServiceCredentialsProvider = lambda name: provider if name == "cosmos-cred" else None
-    pkg = types.ModuleType("databricks")
-    pkg.service_credentials = module
-    monkeypatch.setitem(sys.modules, "databricks", pkg)
-    monkeypatch.setitem(sys.modules, "databricks.service_credentials", module)
-    monkeypatch.setattr(auth, "_DRIVER_TOKENS", auth._DriverTokenCache())
-    token = mint_driver_token(opts(service_credential="cosmos-cred").auth, BASE["endpoint"])
-    assert token.value == "uc-token"
+@pytest.mark.parametrize(
+    "extra",
+    [{"auth_type": "service_credential", "service_credential": "cosmos-cred"}, {"service_credential": "cosmos-cred"}],
+)
+def test_service_credential_is_rejected_with_the_alternatives(extra: dict[str, str]) -> None:
+    with pytest.raises(CosmosConfigError, match="auth_type=service_credential is not supported") as info:
+        opts(**extra)
+    message = str(info.value)
+    assert "auth_type=service_principal" in message and "getServiceCredentialsProvider" in message
+    assert "auth_type=access_token" in message
 
 
 def test_identity_extra_message(monkeypatch: pytest.MonkeyPatch) -> None:

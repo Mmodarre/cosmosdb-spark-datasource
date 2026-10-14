@@ -9,7 +9,7 @@ Pipeline configuration keys (set in ``resources/*.pipeline.yml`` from the bundle
     cosmos.secret_key.account_key                                 key: account key
     cosmos.tenant_id, cosmos.secret_key.client_id,
     cosmos.secret_key.client_secret                               service_principal
-    cosmos.service_credential                                     service_credential
+    cosmos.service_credential                                     service_credential: a token minted from it
     cosmos.partitions_per_feed_range, cosmos.priority             optional data source options
     cosmos.max_items_per_trigger                                  optional; "0" means unlimited
 
@@ -64,7 +64,9 @@ def register_cosmosdb(spark: Any) -> None:
     spark.dataSource.register(CosmosDBDataSource)
 
 
-def _auth_options(spark: Any, scope: str) -> dict[str, str]:
+def _auth_options(spark: Any, scope: str, endpoint: str) -> dict[str, str]:
+    from urllib.parse import urlsplit
+
     from databricks.sdk.runtime import dbutils
 
     auth_type = conf(spark, "cosmos.auth_type", "key").strip().lower()
@@ -84,13 +86,22 @@ def _auth_options(spark: Any, scope: str) -> dict[str, str]:
             "client_secret": dbutils.secrets.get(scope, conf(spark, "cosmos.secret_key.client_secret")),
         }
     if auth_type == "service_credential":
+        # The data source cannot resolve a service credential where Spark plans its reads, so the
+        # token is minted here, on the driver. It is not refreshed: an update must end within its
+        # lifetime (about one hour).
         name = optional_conf(spark, "cosmos.service_credential")
         if name is None:
             raise ValueError("auth_type=service_credential needs the bundle variable service_credential.")
-        return {"auth_type": "service_credential", "service_credential": name}
+        token = dbutils.credentials.getServiceCredentialsProvider(name).get_token(
+            f"https://{urlsplit(endpoint).hostname}/.default"
+        )
+        return {
+            "auth_type": "access_token",
+            "access_token": token.token,
+            "access_token_expires_on": str(token.expires_on),
+        }
     if auth_type == "default":
         return {"auth_type": "default"}
-    # access_token is left out on purpose: a pre-minted token expires during long-running pipelines.
     raise ValueError(f"auth_type must be key, service_principal, service_credential or default, got {auth_type!r}.")
 
 
@@ -99,11 +110,12 @@ def cosmos_options(spark: Any) -> dict[str, str]:
     from databricks.sdk.runtime import dbutils
 
     scope = conf(spark, "cosmos.secret_scope")
+    endpoint = dbutils.secrets.get(scope, conf(spark, "cosmos.secret_key.endpoint"))
     options = {
-        "endpoint": dbutils.secrets.get(scope, conf(spark, "cosmos.secret_key.endpoint")),
+        "endpoint": endpoint,
         "database": conf(spark, "cosmos.database"),
         "container": conf(spark, "cosmos.container"),
-        **_auth_options(spark, scope),
+        **_auth_options(spark, scope, endpoint),
     }
     for name in _READ_OPTIONS:
         value = optional_conf(spark, f"cosmos.{name}")

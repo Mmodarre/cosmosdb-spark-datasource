@@ -33,8 +33,8 @@ optionally `azure-identity`), which serverless environments and pipelines can in
 - **Change feed as a batch read**, optionally continued from a batch checkpoint
   ([details](#change-feed-as-a-batch-read)).
 - **Authentication**: account key, Entra ID service principal (secret or certificate), pre-minted
-  access token, Unity Catalog service credential, or `DefaultAzureCredential`. Tokens are minted on
-  the driver and shipped to the tasks.
+  access token (for example from a Unity Catalog service credential), or `DefaultAzureCredential`.
+  Tokens are minted on the driver and shipped to the tasks.
 - **Throughput control**: `priority`, throughput buckets and a per-read RU budget
   ([details](#throughput-control)).
 - **Typed reads**: a user-specified schema is filled from the documents with safe conversions, in
@@ -193,12 +193,11 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `endpoint` | required | Account URI, `https://<account>.documents.azure.com:443/` |
 | `database` | required | Database name |
 | `container` | required | Container name |
-| `auth_type` | inferred | `key`, `service_principal`, `access_token`, `service_credential` or `default`. Inferred when exactly one credential option is set; `default` must be explicit. See [Authentication](#authentication). |
+| `auth_type` | inferred | `key`, `service_principal`, `access_token` or `default`. Inferred when exactly one credential option is set; `default` must be explicit. `service_credential` is rejected, see [Authentication](#authentication). |
 | `account_key` | | Account key (`auth_type=key`) |
 | `tenant_id`, `client_id`, `client_secret` | | Entra ID service principal (`auth_type=service_principal`) |
 | `client_certificate`, `client_certificate_password` | | Service principal with a certificate instead of `client_secret`: the base64 of a PEM (private key and certificate) or PKCS#12 file, and its password if it has one |
 | `access_token`, `access_token_expires_on` | | Pre-minted bearer token. Expiry in epoch seconds or ISO-8601; read from the JWT `exp` claim if omitted (`auth_type=access_token`). |
-| `service_credential` | | Unity Catalog service credential name (`auth_type=service_credential`) |
 | `preferred_regions` | account default | Comma-separated read regions, e.g. `West Europe,North Europe` |
 | `consistency_level` | account default | `Strong`, `BoundedStaleness`, `Session`, `ConsistentPrefix` or `Eventual` (can only weaken the account level) |
 | `priority` | | `Low` or `High` ([priority-based execution](https://learn.microsoft.com/azure/cosmos-db/priority-based-execution)). `Low` lets OLTP traffic win under contention. |
@@ -467,13 +466,13 @@ messages.
 | `auth_type` | Use for |
 |---|---|
 | `key` | development and tests; read the key from a secret scope |
-| `default` | local development (`az login`) or compute with a managed identity (`DefaultAzureCredential`) |
-| `service_principal` | production jobs and pipelines |
-| `service_credential` | Databricks with a Unity Catalog service credential |
-| `access_token` | tokens minted outside Spark |
+| `service_principal` | production jobs and pipelines, on Databricks with the client secret from a secret scope; the only Entra ID mode that refreshes tokens on Databricks |
+| `access_token` | tokens minted outside the data source, for example from a Unity Catalog service credential; no refresh, so a run must end within the token's lifetime (about one hour) |
+| `default` | local development (`az login`) or compute with a managed identity (`DefaultAzureCredential`); not on Databricks, see below |
 
 Entra ID identities need a Cosmos DB **data-plane** role, such as *Cosmos DB Built-in Data Reader*
-(`00000000-0000-0000-0000-000000000001`), on the account or database; control-plane roles are not
+(`00000000-0000-0000-0000-000000000001`), on the account, a database or a single container
+(`/dbs/<database>/colls/<container>`, enough for every read mode); control-plane roles are not
 enough.
 
 ```python
@@ -493,10 +492,7 @@ opts = {
     "client_certificate": dbutils.secrets.get("<scope>", "<certificate-base64>"),
 }
 
-# Unity Catalog service credential
-opts = {"auth_type": "service_credential", "service_credential": "<credential-name>"}
-
-# Token minted in the notebook
+# Unity Catalog service credential: mint a token on the driver (valid for about one hour)
 cred = dbutils.credentials.getServiceCredentialsProvider("<credential-name>")
 tok = cred.get_token("https://<account>.documents.azure.com/.default")
 opts = {"auth_type": "access_token", "access_token": tok.token, "access_token_expires_on": str(tok.expires_on)}
@@ -506,13 +502,20 @@ For every Entra ID mode, a token for `https://<account>.documents.azure.com/.def
 the driver when the read is planned: once per batch read, and for every micro-batch of a stream.
 It travels inside the input partitions, so executors normally make no Entra ID calls. When a
 long-running task gets within 10 minutes of the token's expiry, `service_principal` and `default`
-build the credential on the executor, `service_credential` looks the credential up again, and
-`access_token` fails with a clear message (no refresh is possible).
+build the credential on the executor, and `access_token` fails with a clear message (no refresh is
+possible).
 
-`service_credential` tries, in order, `databricks.service_credentials`, `pyspark.dbutils.DBUtils`
-and `databricks.sdk.runtime.dbutils`. Whether these resolve inside Python data source worker
-processes on serverless compute and SDP has not been verified; if none does, the read fails with
-instructions, and the `access_token` pattern above is the alternative.
+On Databricks (verified on serverless, classic dedicated and standard access mode):
+- **Unity Catalog service credentials cannot be used by the data source itself**, so
+  `auth_type=service_credential` is rejected with this guidance. Spark plans Python data source
+  reads in worker processes where none of the lookups works: `databricks.service_credentials`
+  only works in UDF and task processes, and `dbutils` needs a notebook or job context. Planning
+  needs a token as well. Mint a token on the driver as shown above (verified on all three compute
+  types, with least privilege), or use a service principal for streams that run longer than an
+  hour.
+- **`default`** finds no customer identity: IMDS is blocked on standard access mode and on
+  serverless, and on dedicated mode it returns the workspace's Databricks-managed identity, shared
+  by every cluster of the workspace.
 
 Secrets and tokens are never logged and never appear in the `repr()` of options, readers or input
 partitions; SDK exception messages pass through a redaction filter. Spark serializes data source
@@ -760,8 +763,10 @@ throughput for that.
   continuously running stream reads the whole container in every micro-batch.
 - Change-feed requests use Gateway mode (the Python SDK has no Direct mode).
 - Live partition splits and merges have not been tested against the service.
-- `service_principal` (secret or certificate) and `service_credential` are unit-tested only;
-  `default` was tested with the Azure CLI credential.
+- `service_principal` with a client secret was run on Databricks (serverless, classic dedicated and
+  standard access mode); with a certificate it is unit-tested only. `default` was tested with the
+  Azure CLI credential. Unity Catalog service credentials are only usable through a token minted on
+  the driver (`auth_type=access_token`).
 - No global throughput control across reads or jobs, and no Spark UI custom metrics (the Python
   Data Source API has no hook for them).
 - VARIANT and interval types are not produced directly; read STRING and use `parse_json()`.
@@ -800,7 +805,7 @@ throughput for that.
 | `Spark called getDefaultReadLimit() ... no SupportsTriggerAvailableNow class was found` | The engine uses the PySpark 4.2 protocol, but no AvailableNow mixin was found at import, so `Trigger.AvailableNow` may run one micro-batch per trigger. Report the modules listed in the message. |
 | HTTP 429 after retries | Too little RU for the parallelism: raise throughput or `throttle_max_wait_seconds`, reduce `partitions_per_feed_range`, or use `priority=Low` |
 | `azure-identity is required` | Install `azure-identity` or the `identity` extra |
-| `service credential ... is not available in this Python process` | Use `auth_type=access_token` with a token minted in the notebook |
+| `auth_type=service_credential is not supported` | Mint a token from the service credential on the driver and use `auth_type=access_token`, or use `auth_type=service_principal` |
 
 ## Documentation
 

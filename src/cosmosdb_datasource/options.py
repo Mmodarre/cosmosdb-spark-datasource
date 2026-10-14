@@ -32,7 +32,6 @@ AUTH_TYPES = (
     AUTH_KEY,
     AUTH_SERVICE_PRINCIPAL,
     AUTH_ACCESS_TOKEN,
-    AUTH_SERVICE_CREDENTIAL,
     AUTH_DEFAULT,
 )
 
@@ -253,7 +252,6 @@ class AuthOptions:
     auth_type: str
     tenant_id: str | None = None
     client_id: str | None = None
-    service_credential: str | None = None
     access_token_expires_on: int | None = None
     # Secrets: excluded from repr/eq so they never end up in logs or error messages.
     account_key: str | None = field(default=None, repr=False, compare=False)
@@ -375,16 +373,32 @@ def _infer_auth_type(opts: dict[str, str]) -> str:
     )
 
 
+# Spark plans Python data source reads (partitions(), latestOffset(), initialOffset()) in worker processes,
+# and every lookup of a Unity Catalog service credential fails there: databricks.service_credentials
+# only works in UDF and task processes, dbutils needs a SparkSession or notebook auth (verified on
+# Databricks serverless, classic dedicated and standard access mode). Planning also needs the token.
+SERVICE_CREDENTIAL_UNSUPPORTED = (
+    "auth_type=service_credential is not supported: Spark plans Python data source reads in worker "
+    "processes that cannot use Unity Catalog service credentials. Use auth_type=service_principal with "
+    "the client secret from a secret scope, which workers can refresh. For runs shorter than the token "
+    "lifetime (about one hour), mint a token on the driver with "
+    "dbutils.credentials.getServiceCredentialsProvider('<name>').get_token("
+    "'https://<account>.documents.azure.com/.default') and pass auth_type=access_token, access_token and "
+    "access_token_expires_on."
+)
+
+
 def _parse_auth(opts: dict[str, str]) -> AuthOptions:
     raw_type = _get(opts, "auth_type")
     auth_type = raw_type.lower() if raw_type else _infer_auth_type(opts)
+    if auth_type == AUTH_SERVICE_CREDENTIAL:
+        raise CosmosConfigError(SERVICE_CREDENTIAL_UNSUPPORTED)
     if auth_type not in AUTH_TYPES:
         raise CosmosConfigError(f"Option 'auth_type' must be one of {', '.join(AUTH_TYPES)}, got {raw_type!r}.")
     auth = AuthOptions(
         auth_type=auth_type,
         tenant_id=_get(opts, "tenant_id"),
         client_id=_get(opts, "client_id"),
-        service_credential=_get(opts, "service_credential"),
         access_token_expires_on=_parse_expires_on(_get(opts, "access_token_expires_on")),
         account_key=_get(opts, "account_key"),
         client_secret=_get(opts, "client_secret"),
@@ -396,7 +410,6 @@ def _parse_auth(opts: dict[str, str]) -> AuthOptions:
         AUTH_KEY: ("account_key",),
         AUTH_SERVICE_PRINCIPAL: ("tenant_id", "client_id"),
         AUTH_ACCESS_TOKEN: ("access_token",),
-        AUTH_SERVICE_CREDENTIAL: ("service_credential",),
         AUTH_DEFAULT: (),
     }[auth_type]
     missing = [name for name in required if not _get(opts, name)]

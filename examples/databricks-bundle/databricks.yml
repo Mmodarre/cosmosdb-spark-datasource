@@ -58,7 +58,7 @@ variables:
     description: Secret key of the client secret (auth_type=service_principal)
     default: client-secret
   service_credential:
-    description: Unity Catalog service credential (auth_type=service_credential); "none" when unused
+    description: Unity Catalog service credential to mint a token from on the driver (auth_type=service_credential); "none" when unused
     default: none
 
   partitions_per_feed_range:
