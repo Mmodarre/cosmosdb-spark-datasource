@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from cosmosdb_datasource.errors import REDACTED, CosmosConfigError
 
@@ -117,6 +119,8 @@ KNOWN_OPTIONS = frozenset(
         "consistency_level",
         "connection_timeout_seconds",
         "read_timeout_seconds",
+        "tls_verify",
+        "tls_ca_bundle",
         "throttle_max_retries",
         "throttle_max_wait_seconds",
         "max_retries",
@@ -161,7 +165,45 @@ KNOWN_OPTIONS = frozenset(
     }
 )
 
-_ENDPOINT_RE = re.compile(r"^https://[A-Za-z0-9.\-]+(:\d+)?/?$")
+_ENDPOINT_HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+$")
+
+
+def _is_local_host(host: str) -> bool:
+    """Loopback addresses, ``localhost`` and single-label names (an emulator container on a local network)."""
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return "." not in host
+
+
+def _parse_endpoint(raw: str) -> str:
+    parts = urlsplit(raw)
+    host = parts.hostname or ""
+    valid_host = bool(_ENDPOINT_HOST_RE.match(host)) or host == "::1"
+    try:
+        port_ok = parts.port is None or parts.port > 0
+    except ValueError:
+        port_ok = False
+    if (
+        parts.scheme not in ("https", "http")
+        or not valid_host
+        or not port_ok
+        or parts.path not in ("", "/")
+        or parts.query
+        or parts.fragment
+        or parts.username
+    ):
+        raise CosmosConfigError(
+            f"Option 'endpoint' must look like https://<account>.documents.azure.com:443/, got {raw!r}."
+        )
+    if parts.scheme == "http" and not _is_local_host(host):
+        raise CosmosConfigError(
+            "Option 'endpoint' must use https://. http:// is accepted only for an emulator on this machine or a "
+            f"local network (localhost, a loopback address or a host name without a domain), got {raw!r}."
+        )
+    return raw
 
 
 def _normalize(options: Mapping[str, Any] | None) -> dict[str, str]:
@@ -281,6 +323,8 @@ class CosmosOptions:
     consistency_level: str | None = None
     connection_timeout_seconds: int | None = None
     read_timeout_seconds: int | None = None
+    tls_verify: bool = True
+    tls_ca_bundle: str | None = None
     throttle_max_retries: int = 9
     throttle_max_wait_seconds: int = 60
     max_retries: int = 8
@@ -599,10 +643,7 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
     if missing:
         raise CosmosConfigError(f"Missing required option(s): {', '.join(missing)}.")
     assert endpoint is not None and database is not None and container is not None
-    if not _ENDPOINT_RE.match(endpoint):
-        raise CosmosConfigError(
-            f"Option 'endpoint' must look like https://<account>.documents.azure.com:443/, got {endpoint!r}."
-        )
+    _parse_endpoint(endpoint)
 
     consistency_raw = _get(opts, "consistency_level")
     consistency = None
@@ -700,6 +741,13 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
     if test_backend is not None and os.environ.get(TEST_HOOKS_ENV) != "1":
         raise CosmosConfigError(f"Unknown option '{TEST_BACKEND_OPTION}'.")
 
+    tls_verify = _bool(opts, "tls_verify", True)
+    tls_ca_bundle = _get(opts, "tls_ca_bundle")
+    if tls_ca_bundle is not None and not tls_verify:
+        raise CosmosConfigError("Options 'tls_ca_bundle' and 'tls_verify=false' cannot be combined.")
+    if not tls_verify:
+        logger.warning("tls_verify=false: the TLS certificate of %s is not verified.", endpoint)
+
     regions_raw = _get(opts, "preferred_regions")
     regions = tuple(r.strip() for r in regions_raw.split(",") if r.strip()) if regions_raw else ()
 
@@ -712,6 +760,8 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
         consistency_level=consistency,
         connection_timeout_seconds=_int(opts, "connection_timeout_seconds", None, minimum=1),
         read_timeout_seconds=_int(opts, "read_timeout_seconds", None, minimum=1),
+        tls_verify=tls_verify,
+        tls_ca_bundle=tls_ca_bundle,
         throttle_max_retries=_int(opts, "throttle_max_retries", 9, minimum=0),  # type: ignore[arg-type]
         throttle_max_wait_seconds=_int(opts, "throttle_max_wait_seconds", 60, minimum=0),  # type: ignore[arg-type]
         max_retries=_int(opts, "max_retries", 8, minimum=0),  # type: ignore[arg-type]

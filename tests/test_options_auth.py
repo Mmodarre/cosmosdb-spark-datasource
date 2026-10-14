@@ -27,7 +27,7 @@ def test_required_options() -> None:
     with pytest.raises(CosmosConfigError, match="endpoint, database, container"):
         parse_options({"account_key": KEY})
     with pytest.raises(CosmosConfigError, match="endpoint"):
-        parse_options({**BASE, "endpoint": "http://insecure", "account_key": KEY})
+        parse_options({**BASE, "endpoint": "http://insecure.example.com", "account_key": KEY})
 
 
 def test_options_are_case_insensitive_and_typed() -> None:
@@ -371,3 +371,55 @@ def test_unsupported_runtimes_fail_with_the_minimum_versions(tmp_path, datasourc
         and "DBR 15.4 LTS" in result.stderr
         and "serverless environment version 2" in result.stderr
     )
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://acct.documents.azure.com:443/",
+        "https://acct.documents.azure.com",
+        "https://localhost:8081/",
+        "http://localhost:8081/",
+        "http://127.0.0.1:8081",
+        "http://[::1]:8081/",
+        "http://cosmos-emulator:8081/",
+        "http://emulator.localhost:8081/",
+    ],
+)
+def test_accepted_endpoints(endpoint: str) -> None:
+    assert parse_options({**BASE, "endpoint": endpoint, "account_key": KEY}).endpoint == endpoint
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "message"),
+    [
+        ("http://acct.documents.azure.com:443/", "must use https://"),
+        ("http://10.0.0.5:8081/", "must use https://"),
+        ("ftp://acct.documents.azure.com/", "must look like"),
+        ("https://acct.documents.azure.com/dbs/x", "must look like"),
+        ("https://user@acct.documents.azure.com/", "must look like"),
+        ("https://acct.documents.azure.com:notaport/", "must look like"),
+        ("acct.documents.azure.com", "must look like"),
+    ],
+)
+def test_rejected_endpoints(endpoint: str, message: str) -> None:
+    with pytest.raises(CosmosConfigError, match=message):
+        parse_options({**BASE, "endpoint": endpoint, "account_key": KEY})
+
+
+def test_tls_options_reach_the_sdk(caplog: pytest.LogCaptureFixture) -> None:
+    from cosmosdb_datasource.client import _client_key
+
+    default = _sdk_policy()
+    assert not default.DisableSSLVerification and default.SSLConfiguration is None
+    with caplog.at_level(logging.WARNING, logger="cosmosdb_datasource"):
+        unverified = _sdk_policy(tls_verify="false")
+    assert unverified.DisableSSLVerification and "not verified" in caplog.text
+    bundle = _sdk_policy(tls_ca_bundle="/etc/ssl/corp-ca.pem")
+    assert bundle.SSLConfiguration.SSLCaCerts == "/etc/ssl/corp-ca.pem" and not bundle.DisableSSLVerification
+    keys = {
+        _client_key(opts(account_key=KEY, **extra)) for extra in ({}, {"tls_verify": "false"}, {"tls_ca_bundle": "/x"})
+    }
+    assert len(keys) == 3
+    with pytest.raises(CosmosConfigError, match="cannot be combined"):
+        opts(account_key=KEY, tls_verify="false", tls_ca_bundle="/x")

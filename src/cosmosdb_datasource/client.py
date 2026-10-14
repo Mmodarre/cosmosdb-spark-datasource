@@ -61,6 +61,8 @@ def _client_key(opts: CosmosOptions) -> tuple[Any, ...]:
         opts.throttle_max_retries,
         opts.throttle_max_wait_seconds,
         opts.throughput_bucket,
+        opts.tls_verify,
+        opts.tls_ca_bundle,
     )
     return principal + settings
 
@@ -74,12 +76,17 @@ def _connection_policy(opts: CosmosOptions) -> Any:
     ``RetryOptions``, whose class the public ``ConnectionPolicy.RetryOptions`` setter takes.
     """
     from azure.cosmos._retry_options import RetryOptions
-    from azure.cosmos.documents import ConnectionPolicy
+    from azure.cosmos.documents import ConnectionPolicy, SSLConfiguration
 
     policy = ConnectionPolicy()
     policy.RetryOptions = RetryOptions(
         max_retry_attempt_count=opts.throttle_max_retries, max_wait_time_in_seconds=opts.throttle_max_wait_seconds
     )
+    if opts.tls_ca_bundle:
+        # Passed to the transport as connection_verify=<path> (azure-cosmos _synchronized_request).
+        ssl = SSLConfiguration()
+        ssl.SSLCaCerts = opts.tls_ca_bundle
+        policy.SSLConfiguration = ssl
     return policy
 
 
@@ -88,6 +95,9 @@ def _client_kwargs(opts: CosmosOptions) -> dict[str, Any]:
         "user_agent_suffix": f"cosmosdb-spark-datasource/{__version__}",
         "connection_policy": _connection_policy(opts),
     }
+    if not opts.tls_verify:
+        # The SDK resets ConnectionPolicy.DisableSSLVerification from this keyword.
+        kwargs["connection_verify"] = False
     if opts.preferred_regions:
         kwargs["preferred_locations"] = list(opts.preferred_regions)
     if opts.consistency_level:
