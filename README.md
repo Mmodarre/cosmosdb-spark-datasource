@@ -18,7 +18,10 @@ optionally `azure-identity`), which serverless environments and pipelines can in
 ## Features
 
 - **Batch reads**: one Spark task per physical partition (feed range), optionally split further by
-  effective partition key (EPK); a server-side `query` with parameters.
+  effective partition key (EPK); a server-side `query` with parameters; opt-in
+  [filter pushdown](#filter-pushdown); [schema inference](#schema-inference) by sampling.
+- **Logical partitions and point reads**: `partition_key`, `item_ids` and `read_many` for a
+  DataFrame of `(id, pk)` ([details](#logical-partitions-and-point-reads)).
 - **Change-feed streams** in `LatestVersion` or `AllVersionsAndDeletes` mode. Micro-batches are
   bounded by LSN per range, so a retried or replayed batch reads the same changes.
 - **Initial snapshot** (`initial_snapshot=true`): the first micro-batch reads the whole container,
@@ -27,13 +30,18 @@ optionally `azure-identity`), which serverless environments and pipelines can in
   `AllVersionsAndDeletes`.
 - **Snapshot stream** (`snapshot_stream=true`): every micro-batch is one complete snapshot of the
   container, stamped with `snapshot_ts`, so an append flow keeps a history of container states.
-- **Authentication**: account key, Entra ID service principal, pre-minted access token, Unity
-  Catalog service credential, or `DefaultAzureCredential`. Tokens are minted on the driver and
-  shipped to the tasks.
+- **Change feed as a batch read**, optionally continued from a batch checkpoint
+  ([details](#change-feed-as-a-batch-read)).
+- **Authentication**: account key, Entra ID service principal (secret or certificate), pre-minted
+  access token, Unity Catalog service credential, or `DefaultAzureCredential`. Tokens are minted on
+  the driver and shipped to the tasks.
+- **Throughput control**: `priority`, throughput buckets and a per-read RU budget
+  ([details](#throughput-control)).
 - **Typed reads**: a user-specified schema is filled from the documents with safe conversions, in
   `PERMISSIVE`, `DROPMALFORMED` or `FAILFAST` mode.
-- Rows are streamed page by page, one client is reused per Python worker, retries back off with
-  jitter and honour `x-ms-retry-after-ms`, and per-partition metrics (rows, RU, duration) can be
+- Rows are streamed page by page with the next page read ahead and handed to Spark as Arrow
+  batches, one client is reused per Python worker, retries back off with jitter and honour
+  `x-ms-retry-after-ms`, and per-partition metrics (rows, RU, duration) and slow requests can be
   logged.
 
 ## Compatibility
@@ -746,8 +754,10 @@ throughput for that.
   continuously running stream reads the whole container in every micro-batch.
 - Change-feed requests use Gateway mode (the Python SDK has no Direct mode).
 - Live partition splits and merges have not been tested against the service.
-- `service_principal` and `service_credential` are unit-tested only; `default` was tested with the
-  Azure CLI credential.
+- `service_principal` (secret or certificate) and `service_credential` are unit-tested only;
+  `default` was tested with the Azure CLI credential.
+- No global throughput control across reads or jobs, and no Spark UI custom metrics (the Python
+  Data Source API has no hook for them).
 - VARIANT and interval types are not produced directly; read STRING and use `parse_json()`.
 
 ## Databricks notes
