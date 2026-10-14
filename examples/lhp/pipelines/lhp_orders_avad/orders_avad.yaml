@@ -1,0 +1,83 @@
+# AllVersionsAndDeletes with an initial snapshot to SCD1 with hard deletes (MODES.md, mode 4).
+#
+#   cosmosdb readStream (AVAD, start_from=Now, initial_snapshot=true)
+#     -> bronze orders_changes_avad (append-only)
+#     -> rank (SQL) -> silver orders_avad (SCD1, apply_as_deletes)
+#
+# Micro-batch 0 is a snapshot of the whole container (operation='snapshot', lsn=0), read after the
+# start position P0 is in the stream's offset log; later micro-batches hold the changes from P0 on.
+# Do not replace initial_snapshot with a separate `once: true` snapshot flow: SDP does not order two
+# flows of one update (MODES.md, "Why not a separate one-time snapshot flow with AVAD").
+#
+# Needs continuous backup with the AVAD change feed; history is readable only within the backup
+# retention, so run this pipeline well within it. Full refresh only of the whole pipeline.
+pipeline: lhp_orders_avad
+flowgroup: orders_avad
+presets:
+  - cosmos_connection
+
+actions:
+  - name: load_orders_avad_stream
+    type: load
+    readMode: stream
+    operational_metadata: ["_ingested_at"]
+    source:
+      type: custom_datasource
+      options:
+        container: "${orders_container}"
+        change_feed_mode: AllVersionsAndDeletes
+        start_from: Now
+        initial_snapshot: "true"
+        partitions_per_feed_range: "${partitions_per_feed_range}"
+    target: v_orders_avad_stream
+    description: "AVAD change feed of the orders container; micro-batch 0 is a snapshot"
+
+  - name: write_orders_changes_avad
+    type: write
+    source: v_orders_avad_stream
+    write_target:
+      type: streaming_table
+      catalog: "${catalog}"
+      schema: "${bronze_schema}"
+      table: orders_changes_avad
+      comment: "Raw AVAD change feed: the initial snapshot (operation='snapshot'), then create/replace/delete"
+
+  - name: load_orders_changes_avad
+    type: load
+    readMode: stream
+    source:
+      type: delta
+      catalog: "${catalog}"
+      schema: "${bronze_schema}"
+      table: orders_changes_avad
+    target: v_orders_changes_avad
+
+  # Every change row outranks every snapshot row of the same key, then _ts (for deletes the delete's
+  # crts), then lsn for ties within a second (MODES.md, "Ordering").
+  - name: rank_orders_changes_avad
+    type: transform
+    transform_type: sql
+    source: v_orders_changes_avad
+    target: v_orders_changes_avad_ranked
+    sql: |
+      SELECT
+        *,
+        CASE WHEN operation = 'snapshot' THEN 0 ELSE 1 END AS _source_rank
+      FROM stream(v_orders_changes_avad)
+
+  - name: write_orders_avad
+    type: write
+    source: v_orders_changes_avad_ranked
+    write_target:
+      type: streaming_table
+      mode: cdc
+      catalog: "${catalog}"
+      schema: "${silver_schema}"
+      table: orders_avad
+      comment: "Current state of each orders document (SCD1) with hard deletes applied"
+      cdc_config:
+        keys: ["pk", "id"]
+        sequence_by: ["_source_rank", "_ts", "lsn"]
+        scd_type: 1
+        apply_as_deletes: "operation = 'delete'"
+        except_column_list: ["_source_rank", "crts", "ttl_expired", "feed_range", "_ingested_at"]

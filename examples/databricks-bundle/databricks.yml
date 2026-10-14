@@ -1,0 +1,77 @@
+# Azure Cosmos DB for NoSQL to Unity Catalog with Lakeflow Spark Declarative Pipelines (serverless),
+# using the cosmosdb Python data source. See README.md.
+#
+# No workspace or environment values are set here: the CLI profile selects the workspace, and the
+# required variables (catalog, cosmos_database, secret_scope) come from --var, BUNDLE_VAR_<name> or
+# .databricks/bundle/<target>/variable-overrides.json.
+bundle:
+  name: cosmosdb_example
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Unity Catalog catalog of all tables (required)
+  bronze_schema:
+    description: Schema of the raw change-feed (bronze) tables
+    default: cosmosdb_bronze
+  silver_schema:
+    description: Schema of the current-state and history (silver) tables
+    default: cosmosdb_silver
+  ops_schema:
+    description: Schema of the pipeline event logs and the reconcile results
+    default: cosmosdb_ops
+  datasource_package:
+    description: >-
+      pip requirement of the data source: a version from PyPI, or the path of a wheel in a Unity
+      Catalog volume. Use ~= rather than < or > in pipeline dependencies.
+    default: cosmosdb-spark-datasource~=0.2.0
+
+  cosmos_database:
+    description: Cosmos DB database (required)
+  customers_container:
+    description: Container read by the snapshot (SCD2) pipeline
+    default: customers
+  orders_container:
+    description: Container read by the two change-feed pipelines
+    default: orders
+
+  secret_scope:
+    description: Secret scope with the Cosmos DB endpoint and credentials (required)
+  secret_key_endpoint:
+    description: Secret key of the account endpoint, https://<account>.documents.azure.com:443/
+    default: endpoint
+  auth_type:
+    description: key, service_principal, service_credential or default
+    default: key
+  secret_key_account_key:
+    description: Secret key of the account key (auth_type=key)
+    default: account-key
+  tenant_id:
+    description: Entra ID tenant id (auth_type=service_principal); "none" when unused
+    default: none
+  secret_key_client_id:
+    description: Secret key of the application (client) id (auth_type=service_principal)
+    default: client-id
+  secret_key_client_secret:
+    description: Secret key of the client secret (auth_type=service_principal)
+    default: client-secret
+  service_credential:
+    description: Unity Catalog service credential (auth_type=service_credential); "none" when unused
+    default: none
+
+  partitions_per_feed_range:
+    description: EPK sub-splits per physical partition; "auto" sizes batch reads to about 1 GiB per task
+    default: "1"
+  priority:
+    description: Priority-based execution, Low or High; "default" does not send the option
+    default: default
+  max_items_per_trigger:
+    description: LSN budget per change-feed micro-batch; "0" means unlimited
+    default: "0"
+
+targets:
+  dev:
+    mode: development
+    default: true
