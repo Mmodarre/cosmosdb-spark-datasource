@@ -14,7 +14,7 @@ import hashlib
 import importlib
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from cosmosdb_datasource._version import __version__
@@ -31,6 +31,8 @@ logger = logging.getLogger("cosmosdb_datasource")
 class _Entry:
     client: Any
     credential: PartitionCredential | None
+    # Serializes requests on ``client`` across its backends (see ``SdkBackend``).
+    lock: threading.RLock = field(default_factory=threading.RLock)
 
 
 _LOCK = threading.Lock()
@@ -171,6 +173,7 @@ def get_backend(opts: CosmosOptions, token: SecretToken | None = None) -> Any:
                 prefetch_pages=opts.prefetch_pages,
                 cache_staleness_ms=opts.max_integrated_cache_staleness_ms,
                 slow_requests=slow,
+                sdk_lock=entry.lock,
             )
             _BACKENDS[backend_key] = backend
     return backend

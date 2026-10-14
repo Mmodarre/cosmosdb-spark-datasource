@@ -110,10 +110,13 @@ class FakePager:
         if self._index >= len(self._pages):
             raise StopIteration
         self._threads.append(threading.current_thread().name)
-        self._hook({"x-ms-request-charge": "2", "x-ms-documentdb-partitionkeyrangeid": "0"}, None)
         page = self._pages[self._index]
         self._index += 1
-        self.continuation_token = str(self._index) if self._index < len(self._pages) else None
+        headers = {"x-ms-request-charge": "2", "x-ms-documentdb-partitionkeyrangeid": "0"}
+        if self._index < len(self._pages):
+            headers["x-ms-continuation"] = str(self._index)  # the page's continuation is in its response
+        self._hook(headers, None)
+        self.continuation_token = headers.get("x-ms-continuation")
         return iter(page)
 
 

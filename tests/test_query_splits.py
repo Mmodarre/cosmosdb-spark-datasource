@@ -269,6 +269,41 @@ def test_split_during_a_snapshot_stream_scan(make_store, no_sleep, mode) -> None
     assert len(ids) == len(set(ids)) == 120
 
 
+@pytest.mark.parametrize(("races", "retried"), [(2, True), (3, False)])
+def test_a_concurrent_header_mutation_is_repeated_at_most_twice(make_store, no_sleep, races, retried) -> None:
+    """azure-cosmos 4.17.1 raises this when another request on the client mutates the headers a query copies."""
+    store = make_store(partitions=1)
+    load(store, 100)
+    pages = [0]
+
+    def race() -> None:
+        pages[0] += 1
+        if 4 <= pages[0] < 4 + races:
+            raise RuntimeError(retry.CONCURRENT_HEADER_MUTATION)
+
+    store._before_query_page = race
+    stats = QueryStats()
+    docs = query_documents(
+        FakeBackend(store),
+        "SELECT * FROM c",
+        None,
+        ("", "FF"),
+        10,
+        policy=retry.RetryPolicy(max_retries=8),
+        stats=stats,
+        describe="test",
+        pk=PartitionKeyInfo(paths=("/pk",)),
+    )
+    try:
+        if retried:
+            assert sorted(d["id"] for d in docs) == sorted(f"d{i}" for i in range(100)) and stats.retries == 2
+        else:
+            with pytest.raises(RuntimeError, match="mutated during iteration"):
+                list(docs)
+    finally:
+        store._before_query_page = None
+
+
 def test_seen_keys_is_exact_across_memory_and_disk_runs() -> None:
     rng = random.Random(5)
     seen = SeenKeys(spill_entries=1 << 9, pending_limit=1 << 6)
@@ -295,6 +330,11 @@ def test_fingerprint_tells_a_missing_partition_key_from_null() -> None:
 
 
 class _StubPages:
+    """Pages like the SDK's: the hook sees each response, and the last one carries the page's continuation.
+
+    ``continuation_token`` comes from the client-wide headers, here those of another query on the client.
+    """
+
     def __init__(self, pages, hook) -> None:
         self._pages = iter(pages)
         self._hook = hook
@@ -307,7 +347,9 @@ class _StubPages:
         items, headers_list, token = next(self._pages)
         for headers in headers_list:
             self._hook(headers, {})
-        self.continuation_token = token
+        if token is not None:
+            headers_list[-1]["x-ms-continuation"] = token
+        self.continuation_token = "token of a concurrent query"
         return iter(items)
 
 
@@ -343,5 +385,5 @@ def test_sdk_backend_reports_the_serving_partitions_and_the_server_time() -> Non
     pages = list(SdkBackend(container).query_pages("SELECT * FROM c", None, ("", "FF"), 10, continuation="c0"))
     assert [p.partitions for p in pages] == [("1",), ("4", "5"), ()]
     assert pages[0].server_time == 1792000495.0 and pages[1].server_time is None and pages[2].server_time is None
-    assert pages[0].request_charge == 2.5 and pages[0].continuation == "c1"
+    assert pages[0].request_charge == 2.5 and [p.continuation for p in pages] == ["c1", None, None]
     assert container.calls[0]["continuation"] == "c0" and container.calls[0]["feed_range"]["Range"]["max"] == "FF"

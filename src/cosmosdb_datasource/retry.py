@@ -25,6 +25,14 @@ TRANSIENT_STATUS_CODES = frozenset({408, 410, 429, 449, 500, 502, 503, 504})
 # token sent with the request yet. The SDK retries it once, then raises; the replica catches up.
 SESSION_NOT_AVAILABLE = (404, 1002)
 
+# azure-cosmos 4.17.1 makes each response's headers the client-wide ``last_response_headers`` and writes
+# throttle counters into that object after every request (``_retry_utility.Execute``), while a query
+# copies its own response's headers (``__QueryFeed``). The package serializes its requests per client
+# (``SdkBackend``), but the SDK's background endpoint refresh can still overlap a query, and the copy then
+# fails with this message. The request is repeated without delay, at most twice per read.
+CONCURRENT_HEADER_MUTATION = "OrderedDict mutated during iteration"
+MAX_CONCURRENT_MUTATION_RETRIES = 2
+
 _T = TypeVar("_T")
 
 
@@ -87,6 +95,10 @@ def is_transient(exc: BaseException) -> bool:
     return isinstance(exc, (ServiceRequestError, ServiceResponseError, CosmosClientTimeoutError, ConnectionError))
 
 
+def is_concurrent_header_mutation(exc: BaseException) -> bool:
+    return type(exc) is RuntimeError and str(exc) == CONCURRENT_HEADER_MUTATION
+
+
 def sleep(seconds: float) -> None:
     """Sleep ``seconds``; an indirection so tests can replace sleeping."""
     time.sleep(seconds)
@@ -95,10 +107,15 @@ def sleep(seconds: float) -> None:
 def call_with_retry(fn: Callable[[], _T], policy: RetryPolicy, what: str) -> _T:
     """Call ``fn()``, retried with ``policy`` on transient errors only (bounded by ``max_retries``)."""
     attempt = 0
+    mutations = 0
     while True:
         try:
             return fn()
         except Exception as exc:
+            if is_concurrent_header_mutation(exc) and mutations < MAX_CONCURRENT_MUTATION_RETRIES:
+                mutations += 1
+                log_retry(what, mutations, MAX_CONCURRENT_MUTATION_RETRIES, 0.0, exc)
+                continue
             if not is_transient(exc):
                 raise
             attempt += 1

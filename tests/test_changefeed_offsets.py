@@ -182,10 +182,31 @@ def test_item_without_lsn_is_an_error(no_sleep) -> None:
         run(Script([page([{"id": "x"}], 5)]))
 
 
+def test_concurrent_header_mutation_is_repeated_at_most_twice(no_sleep) -> None:
+    from cosmosdb_datasource.retry import CONCURRENT_HEADER_MUTATION, is_concurrent_header_mutation
+
+    assert is_concurrent_header_mutation(RuntimeError(CONCURRENT_HEADER_MUTATION))
+    assert not is_concurrent_header_mutation(RuntimeError("dictionary changed size during iteration"))
+    assert not is_concurrent_header_mutation(RecursionError(CONCURRENT_HEADER_MUTATION))
+    calls = []
+
+    def flaky() -> str:
+        calls.append(1)
+        if len(calls) <= 3:
+            raise RuntimeError(CONCURRENT_HEADER_MUTATION)
+        return "ok"
+
+    with pytest.raises(RuntimeError):
+        call_with_retry(flaky, RetryPolicy(max_retries=8), "reading")
+    assert len(calls) == 3
+    assert call_with_retry(flaky, RetryPolicy(max_retries=8), "reading") == "ok"
+
+
 def test_retry_classification() -> None:
     assert is_transient(FakeHttpError(429)) and is_transient(FakeHttpError(449)) and is_transient(FakeHttpError(408))
     assert not is_transient(FakeHttpError(404)) and not is_transient(FakeHttpError(401))
     assert is_transient(ConnectionError())
+    assert not is_transient(RuntimeError("OrderedDict mutated during iteration"))  # bounded separately
     assert is_transient(FakeHttpError(404, sub_status=1002))  # read session not available (yet)
     assert not is_transient(FakeHttpError(404, sub_status=0)) and not is_transient(FakeHttpError(404))
     assert retry_after_seconds(FakeHttpError(429, {"x-ms-retry-after-ms": "1500"})) == 1.5

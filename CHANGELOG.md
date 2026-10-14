@@ -86,6 +86,14 @@ First public release.
   source reads in worker processes where Unity Catalog service credentials cannot be resolved. The
   option is now rejected at load time with the alternatives: a token minted from the service
   credential on the driver (`auth_type=access_token`), or `auth_type=service_principal`.
+- Concurrent requests on one client were not safe in azure-cosmos (4.14.0 to 4.17.1). A query page's
+  continuation could be another query's, and 4.17.1 could fail a query with
+  `RuntimeError: OrderedDict mutated during iteration`. The read-ahead thread of a batch read
+  overlaps the reader's own requests, and schema sampling read the partitions in parallel on one
+  client. The package now serializes its requests per client (change-feed position probes stay
+  parallel) and takes each page's continuation from its own response. `read_items` runs its
+  queries one at a time, and schema sampling reads one partition after the other. The remaining
+  error, from the SDK's background endpoint refresh, is repeated at most twice per read.
 - After a container was deleted and re-created, a new stream (new checkpoint) failed on Python
   workers that had read the old container (`Invalid continuation: [Mismatch collection rid]`)
   until the workers restarted. A change-feed read now refreshes the client's cached container
