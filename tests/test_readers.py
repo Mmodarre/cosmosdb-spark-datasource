@@ -18,7 +18,7 @@ from pyspark.sql.types import IntegerType, StringType, StructField, StructType
 
 from cosmosdb_datasource import _base
 from cosmosdb_datasource.errors import CosmosConfigError, CosmosOffsetError
-from cosmosdb_datasource.offsets import Offset
+from cosmosdb_datasource.offsets import Offset, RangeState
 from tests.conftest import fake_options
 from tests.harness import StreamHarness, make_source, run_batch
 
@@ -317,6 +317,40 @@ def test_start_from_now_and_timestamp(make_store) -> None:
     ts = stream(store, start_from="2030-01-01T00:00:00Z")
     ts.start()
     assert ids(ts, ts.run_until_idle()) == sorted(f"d{i}" for i in range(20, 25))
+
+
+@pytest.mark.parametrize("admission_control", [False, True])
+def test_start_from_in_the_future_reads_changes_from_that_time_on(make_store, admission_control) -> None:
+    """The service has no position for a future time: the stream starts at "now", drops earlier changes."""
+    if admission_control and ReadMaxRows is None:
+        pytest.skip("admission control API needs PySpark >= 4.2")
+    store = make_store(partitions=2)
+    load(store, 10)
+    t = store.clock + 100
+    start_from = datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    h = StreamHarness(fake_options(store, start_from=start_from), admission_control=admission_control)
+    h.start()
+    assert not h.run_batch()
+    load(store, 5, start=10)  # before start_from
+    assert not h.run_until_idle()
+    store.clock = t - 1
+    load(store, 3, start=20)  # from start_from on
+    load(store, 1, start=1)  # a document changed again after start_from is delivered in its new version
+    rows = h.run_until_idle()
+    assert ids(h, rows) == ["d1", "d20", "d21", "d22"]
+    assert all(json.loads(e)["not_before"] == t for _, e in h.offset_log)
+    assert h.read_range(*h.offset_log[-1]) == rows  # a replay applies the same bound
+    h.restart()
+    load(store, 2, start=30)
+    assert ids(h, h.run_until_idle()) == ["d30", "d31"]
+
+
+def test_offset_not_before_round_trips_and_is_validated() -> None:
+    off = Offset("rid", "LatestVersion", (RangeState("", "FF", 3),), not_before=1_800_000_000)
+    assert Offset.from_dict(off.to_dict()) == off and off.to_dict()["not_before"] == 1_800_000_000
+    assert "not_before" not in Offset("rid", "LatestVersion", (RangeState("", "FF", 3),)).to_dict()
+    with pytest.raises(CosmosOffsetError, match="not_before"):
+        Offset.from_dict({**off.to_dict(), "not_before": "soon"})
 
 
 def test_max_items_per_trigger_without_admission_control(make_store) -> None:

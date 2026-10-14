@@ -262,7 +262,7 @@ critical = (
 | Option | Default | Description |
 |---|---|---|
 | `change_feed_mode` | `LatestVersion` | `LatestVersion` or `AllVersionsAndDeletes` (requires continuous backup with the all versions and deletes change feed enabled on the account). Set it on every `readStream`: it also selects the change-feed schema. |
-| `start_from` | `Beginning` (LatestVersion), `Now` (AllVersionsAndDeletes) | `Beginning`, `Now` or an ISO-8601 timestamp such as `2026-10-01T00:00:00Z` (no zone means UTC). `AllVersionsAndDeletes` supports only `Now`. Used only for a new checkpoint. |
+| `start_from` | `Beginning` (LatestVersion), `Now` (AllVersionsAndDeletes) | `Beginning`, `Now` or an ISO-8601 timestamp such as `2026-10-01T00:00:00Z` (no zone means UTC). A timestamp delivers the changes with `_ts` at or after it, to the second; a timestamp in the future starts the stream at the current position and skips the changes made before it. `AllVersionsAndDeletes` supports only `Now`. Used only for a new checkpoint. |
 | `max_items_per_trigger` | unlimited | Budget of change-feed **LSNs** per micro-batch, not a row cap: bulk and transactional-batch writes commit many documents under one LSN. Does not apply to the initial snapshot. See [Per-trigger limits](#per-trigger-limits). |
 | `initial_snapshot` | `false` | Read the whole container in the first micro-batch, then the change feed from the position the stream started at |
 | `initial_snapshot_delay_seconds` | `5` | No snapshot read starts earlier than this after the start position was resolved; protects against replica lag where session tokens do not apply (`ConsistentPrefix`, `Eventual`). `0` disables it. |
