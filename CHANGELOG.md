@@ -61,6 +61,16 @@ First public release.
 
 - The default `page_size` is 5000 (was 1000): fewer round trips and about 7% fewer RU per document
   for a full read.
+- The documentation states what was measured on Databricks and against the service:
+  - AvailableNow per runtime (DBR 15.4 to 17.3 run one micro-batch per run);
+  - installation on classic SDP, serverless notebooks and standard access mode;
+  - serverless task retries and network requirements;
+  - partition splits, TTL deletes, and `max_items_per_trigger` batches of up to about 100 times the
+    budget;
+  - AllVersionsAndDeletes on serverless and multi-region-write accounts.
+
+  The example reconcile job disables serverless auto-optimization, so a failed reconcile is not
+  retried.
 
 ### Fixed
 

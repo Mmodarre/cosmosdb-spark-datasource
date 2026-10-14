@@ -140,8 +140,8 @@ micro-batch returns every live document; with `Now` or a timestamp, only later c
 - Latest state, not every version: if a document changes again between a failed attempt and its
   replay, the replay skips it and the next micro-batch has the newer version.
 - Hard deletes never appear, so deleted documents stay in the target table.
-- `max_items_per_trigger` is an LSN budget, not a row cap: bulk and transactional writes put many
-  documents under one LSN.
+- `max_items_per_trigger` is an LSN budget, not a row cap: a transactional batch puts up to 100
+  documents under one LSN, so a micro-batch can hold up to about 100 times the budget.
 - No account requirements: the latest-version feed is always on for the NoSQL API.
 
 **Use it for** large containers without hard deletes (soft deletes, or TTL handled by a periodic
@@ -194,8 +194,9 @@ range for the position probes. Mode 5 makes the initial load a query read instea
 
 **Emits** every create, replace and delete after the start position: `operation` is `create`,
 `replace` or `delete`. For deletes `body` is null, `pk` and `id` come from the delete metadata and
-`_ts` is the delete's `crts`. TTL deletes set `ttl_expired = true` (documented by the service; not
-observed in tests, because TTL purges are asynchronous).
+`_ts` is the delete's `crts`. TTL deletes set `ttl_expired = true`. They arrive when the service's
+background purge runs, which was about 4 minutes after the writes in a test with TTLs of 15 and
+60 s.
 
 **Guarantees and limitations.**
 - Micro-batches are deterministic and replayable, and every version is kept, so a checkpointed,
@@ -203,7 +204,11 @@ observed in tests, because TTL purges are asynchronous).
 - Starts at `Now` only: on its own it never returns documents that were not changed after the
   stream started. It is a change log, not a replica; use mode 4 for a replica.
 - The account needs continuous backup with the AVAD change feed enabled. Accounts that have ever
-  merged a partition, or have partition merge enabled, are not supported by the service.
+  merged a partition, or have partition merge enabled, are not supported by the service. The
+  feature cannot be enabled when the account is created: enable it afterwards, in an update that
+  changes no other property. It works on serverless and multi-region-write accounts (verified; the
+  feed was the same through either write region, and a checkpoint moved between
+  `preferred_regions` without loss or duplicates).
 - History is readable only within the continuous-backup retention (7 or 30 days). A stream stopped
   for longer must start over with a new checkpoint: alert on staleness.
 
@@ -263,8 +268,8 @@ One stream yields the full current state plus every later change, deletes includ
 With `Trigger.AvailableNow` (and triggered SDP updates) Spark captures the run's end position before
 P0 is resolved. The reader moves it once, right after the snapshot, to the current position, so the
 first run also reads the changes made while the snapshot was read and leaves the target complete
-(observed on Databricks with writes during the snapshot). On PySpark 4.0 and 4.1 a run is a single
-micro-batch, so there the changes follow in the next run.
+(observed on Databricks with writes during the snapshot). On OSS PySpark 4.0 and 4.1 and classic
+DBR 15.4 to 17.3 a run is a single micro-batch, so there the changes follow in the next run.
 
 **Use it for** a current-state replica with hard deletes, on an account with continuous backup.
 

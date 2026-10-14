@@ -66,7 +66,8 @@ have it.
 The integration tests run against two Cosmos DB emulators in CI (see
 [CONTRIBUTING.md](CONTRIBUTING.md#integration-tests)). Neither emulator has `AllVersionsAndDeletes`
 or Entra ID: those are covered by unit tests against a service fake and were run manually against
-Azure. Partition splits are covered by the fake only.
+Azure. Partition splits are covered by the fake in CI and were run manually against Azure (see
+[Guarantees](#guarantees)).
 
 ## Installation
 
@@ -78,14 +79,22 @@ pip install "cosmosdb-spark-datasource[identity]" # adds azure-identity (service
 PySpark is not a dependency: the Spark runtime provides it.
 
 - **Databricks serverless notebooks and jobs**: add the package to the notebook or job
-  environment, or run `%pip install cosmosdb-spark-datasource`.
-- **Lakeflow Spark Declarative Pipelines**: add it to the pipeline's `environment.dependencies`.
-  Write version ranges with `~=` (e.g. `cosmosdb-spark-datasource~=0.3.1`): on DBR 18.3 the
-  dependency string `azure-identity>=1.19,<2` failed to install (`ENVIRONMENT_PIP_INSTALL_ERROR`)
-  while `azure-identity~=1.19` installed.
+  environment, or run `%pip install cosmosdb-spark-datasource`. The environment must be version 2
+  or later. A notebook without environment metadata (for example one imported in `SOURCE`
+  format) runs on version 1, where the import fails.
+- **Databricks classic compute**: install it as a cluster library or with `%pip`.
+- **Lakeflow Spark Declarative Pipelines, serverless**: add it to the pipeline's
+  `environment.dependencies`. Write version ranges with `~=` (e.g.
+  `cosmosdb-spark-datasource~=0.3.1`): on DBR 18.3 the dependency string `azure-identity>=1.19,<2`
+  failed to install (`ENVIRONMENT_PIP_INSTALL_ERROR`) while `azure-identity~=1.19` installed.
+- **Lakeflow Spark Declarative Pipelines, classic compute**: put
+  `%pip install cosmosdb-spark-datasource azure-identity~=1.19` in the **first** cell of a notebook
+  source. With any cell before it, even a comment, the update fails with
+  `PIP_INSTALL_NOT_AT_TOP_OF_NOTEBOOK` (DBR 18.3).
 
 A wheel built from source (`uv build`) can be installed the same way from a Unity Catalog volume
-path.
+path. In standard access mode a wheel from a volume installs as a cluster library without an
+artifact allowlist entry (DBR 17.3).
 
 ## Quick start
 
@@ -536,7 +545,7 @@ Entra ID works.
 | Rows | the latest version of each created or updated document | every create, replace and delete, including TTL expiry |
 | Deletes | not captured | `operation = 'delete'`, `body` null, `pk` and `id` from the metadata |
 | Start | `Beginning` (default), `Now` or a timestamp | `Now` only |
-| Account | any | continuous backup with the all versions and deletes change feed; history is kept for the backup retention (7 or 30 days) |
+| Account | any | continuous backup with the all versions and deletes change feed, enabled after the account was created; history is kept for the backup retention (7 or 30 days). Works on serverless and multi-region-write accounts. |
 
 ### Guarantees
 
@@ -550,8 +559,10 @@ Entra ID works.
 - The first micro-batch's start is stored in its end offset, so a replay after a crash uses the
   original start, even with `start_from=Now`.
 - Partition splits re-key the offsets to the new partitions (children inherit the parent's LSN),
-  and reads that race a split stay within their own EPK range. Splits are tested against the
-  service fake, not against a live split; partition merges are not tested.
+  and reads that race a split stay within their own EPK range. Verified against the service:
+  streams in both modes, with and without `initial_snapshot` and sub-split ranges, ran through two
+  consecutive splits (1 to 2 to 3 partitions) on local Spark and on Databricks serverless, with
+  no change lost or delivered twice. Partition merges are not tested.
 - If the replica serving a task is behind the batch's end LSN, the task waits (up to
   `change_feed_end_wait_seconds`) instead of returning a short batch.
 - A checkpoint belongs to one container instance and one mode: a re-created container or a changed
@@ -560,15 +571,20 @@ Entra ID works.
 ### Per-trigger limits
 
 - `max_items_per_trigger` is a budget of LSNs, not rows. Bulk and transactional-batch writes commit
-  many documents under one LSN, so a micro-batch can hold many more rows than the budget.
-- **PySpark 4.0 and 4.1** have no admission control for Python sources: the budget limits each
-  micro-batch's LSN advance, spread across ranges in proportion to their backlog, and
-  `trigger(availableNow=True)` runs a single micro-batch per run. With `initial_snapshot`, the first
-  run's single batch is the snapshot. Do not combine `max_items_per_trigger` with the internal conf
-  `spark.sql.streaming.triggerAvailableNowWrapper.enabled=true` on these versions.
-- **PySpark 4.2, Databricks serverless and SDP** use admission control (`ReadMaxRows`) and native
-  `Trigger.AvailableNow`: one run makes several capped micro-batches up to the position captured at
-  its start, then stops (observed on Databricks serverless jobs and SDP, DBR 18.3). With
+  up to 100 documents under one LSN, so a micro-batch can hold up to about 100 times the budget
+  (measured: a budget of 50 gave micro-batches of 5,000 rows, and a budget of 500 a first
+  micro-batch of 20,300 rows). The LSN advance stays within the budget.
+- **OSS PySpark 4.0 and 4.1, and classic DBR 15.4 LTS to 17.3 LTS** have no admission control for
+  Python sources: the budget limits each micro-batch's LSN advance, spread across ranges in
+  proportion to their backlog, and `trigger(availableNow=True)` runs a single micro-batch per run.
+  With `initial_snapshot`, the first run's single batch is the snapshot. For AvailableNow jobs on
+  these runtimes, leave `max_items_per_trigger` unset so that each run reads the whole backlog, or
+  bound the micro-batches with a `processingTime` trigger instead. Do not combine
+  `max_items_per_trigger` with the internal conf
+  `spark.sql.streaming.triggerAvailableNowWrapper.enabled=true` on these runtimes.
+- **OSS PySpark 4.2, classic DBR 18 and later, serverless (environment versions 2 to 5) and SDP**
+  use admission control (`ReadMaxRows`) and native `Trigger.AvailableNow`: one run makes several
+  capped micro-batches up to the position captured at its start, then stops. With
   `initial_snapshot`, that position is moved once, right after the snapshot (see
   [Initial snapshot](#initial-snapshot)).
 - To work through a large backlog in capped steps in one job on PySpark 4.0 and 4.1 (DBR 17.3),
@@ -628,20 +644,25 @@ while True:
   `crts` null, `ttl_expired = false`), split like a batch read. Its change-feed end equals its
   start, so change rows start with the second micro-batch; `max_items_per_trigger` does not limit
   the snapshot.
-- With `Trigger.AvailableNow` on PySpark 4.2, Databricks serverless and SDP, Spark captures the
-  run's end position before the start position is resolved. The reader moves it once, right after
-  the snapshot, to the current position of every range, so the first run also reads the changes
-  made while the snapshot was read, and one triggered update leaves the merged result complete. On
-  PySpark 4.0 and 4.1 a run is a single micro-batch, so the first run ends after the snapshot.
+- With `Trigger.AvailableNow` on the runtimes with admission control (OSS PySpark 4.2, classic DBR
+  18 and later, serverless, SDP), Spark captures the run's end position before the start position
+  is resolved. The reader moves it once, right after the snapshot, to the current position of
+  every range, so the first run also reads the changes made while the snapshot was read, and one
+  triggered update leaves the merged result complete. On OSS PySpark 4.0 and 4.1 and classic DBR
+  15.4 to 17.3 a run is a single micro-batch, so the first run ends after the snapshot.
 - The snapshot is read only after the start position was resolved and written to Spark's offset
   log. A retry or restart before the first micro-batch is committed reads the snapshot again from
-  the same start position; after it is committed, no snapshot is read again. A new checkpoint (or
-  a full refresh) starts over with a new start position and a new snapshot.
+  the same start position (verified with job retries on Databricks serverless and classic: one
+  snapshot, and every change made between the attempts); after it is committed, no snapshot is read
+  again. A new checkpoint (or a full refresh) starts over with a new start position and a new
+  snapshot.
 - The option only takes effect for a new checkpoint: enabling it on an existing stream does nothing.
 - With `Session` consistency each snapshot query carries the session token recorded when the start
   position was resolved, so no replica behind that position serves it. `Strong` and
   `BoundedStaleness` are not affected by replica lag. With `ConsistentPrefix` or `Eventual` only
-  `initial_snapshot_delay_seconds` mitigates replica lag (best effort).
+  `initial_snapshot_delay_seconds` mitigates replica lag (best effort; 8 of 8 runs with writes
+  during the snapshot converged on an account with `Eventual` default consistency, 5 of them with
+  no delay, which is evidence, not a guarantee).
 - With `LatestVersion`, a document deleted after the start position stays in the merged result if
   the snapshot read it, as deletes are not in that feed.
 
@@ -728,6 +749,15 @@ throughput for that.
   about 23,000 RU, about one minute at 400 RU/s; the same applies to an initial snapshot.
 - Raise (auto)scale throughput temporarily for initial loads, use `priority=Low` to protect OLTP
   traffic, and raise `throttle_max_wait_seconds` for long scans of throttled containers.
+  `priority` needs priority-based execution enabled on the account; serverless accounts do not
+  support it, and the option has no effect there.
+- On a high-latency link a request occasionally stalls until the SDK's socket read timeout (65 s)
+  before it is retried. `read_timeout_seconds=20` shortens such stalls.
+- Planning stays small with many partitions. For 50 physical partitions, `partitions()` took 0.07
+  to 0.5 s on Databricks once the client existed, also for 3,200 input partitions
+  (`partitions_per_feed_range=64`, about 80 bytes each when pickled). Streams probe every range
+  once per trigger, in parallel (about 1 RU each), and their offsets take about 150 bytes per
+  range.
 - A projecting `query` (`SELECT c.id, c.status, c._ts FROM c`) cuts RU, bandwidth and JSON work
   when the whole document is not needed. A selective filter cuts them far more: push it with
   [filter pushdown](#filter-pushdown) or write it into `query`.
@@ -764,7 +794,7 @@ throughput for that.
 - `snapshot_stream`: every snapshot is a full read; with `snapshot_interval_seconds=0` a
   continuously running stream reads the whole container in every micro-batch.
 - Change-feed requests use Gateway mode (the Python SDK has no Direct mode).
-- Live partition splits and merges have not been tested against the service.
+- Partition merges have not been tested.
 - `service_principal` with a client secret was run on Databricks (serverless, classic dedicated and
   standard access mode); with a certificate it is unit-tested only. `default` was tested with the
   Azure CLI credential. Unity Catalog service credentials are only usable through a token minted on
@@ -788,6 +818,26 @@ throughput for that.
   `endOffset` is the backlog in LSNs per range.
 - After a full refresh of only the bronze table of an AUTO CDC flow, the flow fails with
   `DELTA_SOURCE_IGNORE_DELETE` (observed on DBR 18.3): refresh the target together with its source.
+- Classic DBR 18 and later takes the admission-control path from its own
+  `pyspark.sql.streaming.datasource` (no `_engine_pyspark`). DBR 15.4 to 17.3 take the path of
+  OSS PySpark 4.0 and 4.1 (see [Per-trigger limits](#per-trigger-limits)). Standard access mode
+  runs batch reads and streams (DBR 17.3).
+- Serverless jobs retry a failed task even with `max_retries: 0`, unless the task sets
+  `disable_auto_optimization: true`. With `initial_snapshot`, a retry before the first micro-batch
+  commits reads the whole container again: correct, but it costs a full read.
+- Checkpoints move between runtimes: a stream checkpointed on DBR 17.3 continued on serverless and
+  then on DBR 16.4, so a stream can migrate from classic compute to serverless without a new
+  checkpoint.
+- Also verified on Databricks: an SDP full refresh of an `initial_snapshot` pipeline with writes
+  during the refresh converged to the container (classic, DBR 18.3); two streams with separate
+  checkpoints on one container did not interfere; two live splits between micro-batches
+  (serverless).
+- Network: the data source uses Gateway mode only, so it needs HTTPS on port 443 to
+  `<account>.documents.azure.com` and to the regional endpoints
+  (`<account>-<region>.documents.azure.com`), not the Direct-mode ports of the Java connector. On
+  serverless compute a private account is reached through a private endpoint rule in the
+  workspace's network connectivity configuration (NCC), with the account's resource ID and
+  sub-resource `Sql`; this has not been tested.
 
 ## Troubleshooting
 
@@ -808,6 +858,7 @@ throughput for that.
 | HTTP 429 after retries | Too little RU for the parallelism: raise throughput or `throttle_max_wait_seconds`, reduce `partitions_per_feed_range`, or use `priority=Low` |
 | `azure-identity is required` | Install `azure-identity` or the `identity` extra |
 | `auth_type=service_credential is not supported` | Mint a token from the service credential on the driver and use `auth_type=access_token`, or use `auth_type=service_principal` |
+| `PIP_INSTALL_NOT_AT_TOP_OF_NOTEBOOK` (SDP on classic compute) | Move the `%pip install` cell to the top of the notebook source |
 
 ## Documentation
 
