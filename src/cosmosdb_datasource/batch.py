@@ -256,7 +256,7 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
             ]
         self._log_metrics("batch planning", started, feed_ranges=len(ranges), partitions=len(parts))
         logger.info("cosmosdb batch read planned: %d feed range(s), %d partition(s)", len(ranges), len(parts))
-        return parts
+        return self._with_budget(parts)
 
     def _query(self) -> tuple[str, list[dict[str, Any]] | None]:
         return self._opts.query, self._opts.parameters_for_sdk()
@@ -296,7 +296,7 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
         opts = self._opts
         builder = self._row_builder()
         pk = partition.pk
-        backend = self._backend(partition.token)
+        backend = self._backend(partition.token, partition)
         if isinstance(partition, CosmosLogicalPartition):
             backend = KeyRouted(backend, partition.key)
             describe = f"logical partition {partition.key_json}"
@@ -342,7 +342,7 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
 
         started = time.monotonic()
         builder = self._row_builder()
-        backend = self._backend(partition.token)
+        backend = self._backend(partition.token, partition)
         pk = partition.pk
         describe = f"items of range {partition.feed_range}"
         found = 0

@@ -187,6 +187,8 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `preferred_regions` | account default | Comma-separated read regions, e.g. `West Europe,North Europe` |
 | `consistency_level` | account default | `Strong`, `BoundedStaleness`, `Session`, `ConsistentPrefix` or `Eventual` (can only weaken the account level) |
 | `priority` | | `Low` or `High` ([priority-based execution](https://learn.microsoft.com/azure/cosmos-db/priority-based-execution)). `Low` lets OLTP traffic win under contention. |
+| `throughput_bucket` | | Throughput bucket (1 to 5) for every request, to cap this workload at the share of the container's RU/s that the bucket is configured for ([throughput buckets](https://learn.microsoft.com/azure/cosmos-db/throughput-buckets)) |
+| `target_ru_per_second` | | RU budget of one read (or one micro-batch): every task waits after a page as long as needed to keep the read at or below it. See [Throughput control](#throughput-control). |
 | `connection_timeout_seconds` | SDK default | HTTP request timeout |
 | `read_timeout_seconds` | SDK default | Socket read timeout |
 | `throttle_max_retries` | `9` | SDK retries on HTTP 429; `0` disables them, so 429s go straight to the retry layer of `max_retries` |
@@ -611,6 +613,30 @@ snapshots = spark.readStream.format("cosmosdb").options(**conn, container="custo
 - **Limits.** Not a point-in-time read, like batch reads. A snapshot of an empty container has no
   rows, so it is invisible downstream. Read limits (`ReadMaxRows`) are ignored: a snapshot is never
   split across micro-batches. Every snapshot costs a full read and a full copy in the target table.
+
+## Throughput control
+
+- `priority=Low` lets OLTP traffic win when the container is throttled (priority-based execution).
+- `throughput_bucket=N` sends every request in bucket N; the service caps the bucket at the share
+  of the container's throughput configured for it, across every client that uses the bucket.
+- `target_ru_per_second` caps one read. Planning splits the budget evenly over the read's tasks;
+  the tasks on one executor share a token bucket (a file under the temp directory, locked with
+  `flock`) charged with each page's request charge, and sleep while it is in debt. A read stays at
+  or below the budget however its tasks are spread, and tasks on one executor use each other's
+  unused share; tasks that run in later waves get their share only then. Measured on an account:
+  a 1,601 RU read capped at 20 RU/s ran at 18.8 RU/s (85 s; 11.6 s unthrottled).
+
+```python
+gentle = (
+    spark.read.format("cosmosdb")
+    .options(**conn, container="orders", target_ru_per_second="2000", priority="Low")
+    .load()
+)
+```
+
+There is no global throughput control: nothing coordinates the budgets of separate reads, jobs
+or other clients of the container. Use throughput buckets, priority, or a container's own
+throughput for that.
 
 ## Sizing and performance
 

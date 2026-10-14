@@ -197,7 +197,7 @@ class CosmosSnapshotStreamReader(CosmosReaderBase, DataSourceStreamReader, _Avai
             len(ranges),
             len(parts),
         )
-        return parts
+        return self._with_budget(parts)
 
     def read(self, partition: InputPartition | None) -> Iterator[tuple[Any, ...]]:
         if partition is None:
@@ -210,7 +210,7 @@ class CosmosSnapshotStreamReader(CosmosReaderBase, DataSourceStreamReader, _Avai
         stats = QueryStats()
         describe = f"snapshot {partition.snapshot_ts} of range {epk.range_key(partition.lo, partition.hi)}"
         docs = query_documents(
-            self._backend(partition.token),
+            self._backend(partition.token, partition),
             opts.query,
             opts.parameters_for_sdk(),
             (partition.lo, partition.hi),

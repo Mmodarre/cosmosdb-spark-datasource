@@ -10,6 +10,9 @@ First public release.
 
 ### Added
 
+- Throughput control: `throughput_bucket` sends every request in a throughput bucket, and
+  `target_ru_per_second` caps a read (or a micro-batch) with token buckets that its tasks share
+  per executor, charged with each page's request charge. There is no global, cross-job control.
 - Logical-partition and point reads: `partition_key` reads one logical partition (or a prefix of
   a hierarchical key) as one task routed by partition key, `item_ids` and `read_many(identities)`
   read given documents with `read_items`, and pushed `pk = 'v'` / `pk IN (...)` filters read only
