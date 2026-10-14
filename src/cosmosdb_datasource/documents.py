@@ -75,14 +75,14 @@ class PartitionKeyInfo:
         return len(self.paths) > 1
 
     def extract(self, doc: Mapping[str, Any] | None) -> Any:
-        """Native partition key value of ``doc``: a scalar, or a list for hierarchical keys."""
+        """Return the native partition key value of ``doc``: a scalar, or a list for hierarchical keys."""
         if doc is None or not self.paths:
             return None
         values = [_walk(doc, segs) for segs in self._segments]  # type: ignore[attr-defined]
         return values if self.hierarchical else values[0]
 
     def extract_from_metadata(self, value: Any) -> Any:
-        """Partition key as reported in AllVersionsAndDeletes delete metadata.
+        """Return the partition key as reported in AllVersionsAndDeletes delete metadata.
 
         The service reports it as an object keyed by property name (e.g. ``{"deviceId": "d1"}``);
         lists and scalars are accepted too.
@@ -145,7 +145,7 @@ def item_lsn(item: Mapping[str, Any], mode: str) -> int | None:
 
 
 def to_snapshot_record(doc: Mapping[str, Any], pk_info: PartitionKeyInfo) -> ChangeRecord:
-    """A document read by the initial snapshot, in change-feed form (``operation='snapshot'``)."""
+    """Convert a document read by the initial snapshot to change-feed form (``operation='snapshot'``)."""
     return ChangeRecord(
         id=doc.get("id"),
         pk=pk_info.extract(doc),

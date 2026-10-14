@@ -27,9 +27,6 @@ def load(store, n: int, start: int = 0, keys: int = 41, **fields) -> None:
         store.upsert({"id": f"d{i}", "pk": f"p{i % keys}", "v": i, **fields})
 
 
-# -- batch ----------------------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(("ranges", "factor"), [(1, 1), (1, 5), (3, 1), (4, 4), (7, 3)])
 def test_batch_reads_every_document_once(make_store, ranges: int, factor: int) -> None:
     store = make_store(partitions=ranges)
@@ -126,9 +123,6 @@ def test_mode_selection_errors(make_store) -> None:
     with pytest.raises(CosmosConfigError, match="not supported for streaming"):
         q = make_source(fake_options(store, change_feed_mode="LatestVersion", query="SELECT * FROM c"))
         q.streamReader(q.schema())
-
-
-# -- streaming ------------------------------------------------------------------------------------
 
 
 def stream(store, **extra) -> StreamHarness:

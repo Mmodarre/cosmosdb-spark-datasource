@@ -107,7 +107,7 @@ def _load_test_backend(spec: str, opts: CosmosOptions) -> Any:
 
 
 def get_backend(opts: CosmosOptions, token: SecretToken | None = None) -> Any:
-    """Backend for the configured container, sharing one client per process."""
+    """Return the backend for the configured container, sharing one client per process."""
     if opts.test_backend:
         return _load_test_backend(opts.test_backend, opts)
     key = _client_key(opts)

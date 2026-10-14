@@ -5,7 +5,7 @@ Token-based modes mint a short-lived AAD access token on the driver while planni
 executors normally make no AAD calls and use no long-lived secret. Executors fall back to building
 the credential themselves only when the shipped token is about to expire (long batch scans).
 
-Note: Spark pickles the data source object (and therefore its options) into the task closure
+Spark pickles the data source object (and therefore its options) into the task closure
 (``pyspark/sql/worker/plan_data_source_read.py``, ``write_read_func_and_partitions``), so secrets
 passed as options are present in executor memory regardless; they are never logged or rendered
 in ``repr``/error messages by this package.
@@ -72,7 +72,7 @@ class SecretToken:
 
 
 def account_scope(endpoint: str) -> str:
-    """Same scope the SDK requests (``azure/cosmos/_base.py`` ``create_scope_from_url``)."""
+    """Return the scope the SDK requests (``azure/cosmos/_base.py`` ``create_scope_from_url``)."""
     parts = urlsplit(endpoint)
     return f"{parts.scheme}://{parts.hostname}/.default"
 
@@ -127,7 +127,7 @@ def _service_credential_provider(name: str) -> Any:
 
 
 def build_token_credential(auth: AuthOptions) -> Any:
-    """Long-lived azure TokenCredential for the auth type (None for key / access_token)."""
+    """Build the long-lived azure TokenCredential for the auth type (None for key / access_token)."""
     if auth.auth_type == AUTH_SERVICE_PRINCIPAL:
         identity = _identity_module()
         return identity.ClientSecretCredential(
@@ -196,7 +196,7 @@ _DRIVER_TOKENS = _DriverTokenCache()
 
 
 def identity_key(auth: AuthOptions, endpoint: str) -> tuple[str, ...]:
-    """Non-secret identity of the principal, used for caching (never contains secret values)."""
+    """Return the identity of the principal used as a cache key; it never contains secret values."""
     return (
         endpoint,
         auth.auth_type,
@@ -207,7 +207,7 @@ def identity_key(auth: AuthOptions, endpoint: str) -> tuple[str, ...]:
 
 
 def mint_driver_token(auth: AuthOptions, endpoint: str) -> SecretToken | None:
-    """Token to embed into input partitions (None for account-key auth)."""
+    """Mint the token to embed into input partitions (None for account-key auth)."""
     if auth.auth_type == AUTH_KEY:
         return None
     if auth.auth_type == AUTH_ACCESS_TOKEN:

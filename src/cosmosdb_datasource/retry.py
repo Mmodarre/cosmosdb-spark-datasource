@@ -35,7 +35,7 @@ class RetryPolicy:
     max_backoff_seconds: float = 60.0
 
     def delay(self, attempt: int, exc: BaseException | None = None) -> float:
-        """Seconds to sleep before retry ``attempt`` (1-based): retry-after if given, else backoff."""
+        """Return the seconds to sleep before retry ``attempt`` (1-based): retry-after if given, else backoff."""
         hinted = retry_after_seconds(exc) if exc is not None else None
         if hinted is not None:
             return min(self.max_backoff_seconds, hinted) + random.uniform(0, 0.25)
@@ -75,7 +75,7 @@ def retry_after_seconds(exc: BaseException) -> float | None:
 
 
 def is_transient(exc: BaseException) -> bool:
-    """Errors worth retrying after the SDK gave up: throttling, timeouts, transient 5xx, network."""
+    """Return True for errors worth retrying after the SDK gave up: throttling, timeouts, transient 5xx, network."""
     code = status_code(exc)
     if code is not None:
         return code in TRANSIENT_STATUS_CODES or (code, sub_status(exc)) == SESSION_NOT_AVAILABLE
@@ -88,12 +88,12 @@ def is_transient(exc: BaseException) -> bool:
 
 
 def sleep(seconds: float) -> None:
-    """Indirection so tests can replace sleeping."""
+    """Sleep ``seconds``; an indirection so tests can replace sleeping."""
     time.sleep(seconds)
 
 
 def call_with_retry(fn: Callable[[], _T], policy: RetryPolicy, what: str) -> _T:
-    """``fn()``, retried with ``policy`` on transient errors only (bounded by ``max_retries``)."""
+    """Call ``fn()``, retried with ``policy`` on transient errors only (bounded by ``max_retries``)."""
     attempt = 0
     while True:
         try:

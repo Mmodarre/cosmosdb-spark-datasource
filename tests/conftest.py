@@ -42,7 +42,6 @@ def make_store():
 
 
 def java_major() -> int | None:
-    """Major version of the ``java`` on PATH, or None if there is no working JVM."""
     java = shutil.which("java")
     if not java:
         return None

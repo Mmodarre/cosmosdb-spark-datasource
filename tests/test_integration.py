@@ -233,7 +233,7 @@ def write(container: Any, start: int, n: int, **fields: Any) -> None:
 
 
 def seed(container: Any, n: int, keys: int = 20) -> None:
-    """``n`` documents, written in transactional batches (at most 100 operations, one partition key)."""
+    """Write ``n`` documents in transactional batches (at most 100 operations, one partition key)."""
     by_key: dict[str, list[dict[str, Any]]] = {}
     for i in range(n):
         doc = document(i, keys=keys)
@@ -252,7 +252,7 @@ def feed_range_count(container: Any) -> int:
 
 
 def parallel_batch(opts: dict[str, str], workers: int = 8) -> tuple[list[tuple], list[Any], list[int]]:
-    """Like ``harness.run_batch``, but runs the partitions concurrently, one executor per thread."""
+    """Read like ``harness.run_batch``, but run the partitions concurrently, one executor per thread."""
     ds = make_source(opts)
     schema = ds.schema()
     reader = ds.reader(schema)
@@ -267,9 +267,6 @@ def parallel_batch(opts: dict[str, str], workers: int = 8) -> tuple[list[tuple],
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(run, parts))
     return [r for rows in results for r in rows], parts, [len(rows) for rows in results]
-
-
-# -- batch reads ------------------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
@@ -376,9 +373,6 @@ def test_batch_default_credential(seeded) -> None:
     assert len(rows) == n
 
 
-# -- change feed ------------------------------------------------------------------------------------
-
-
 def test_stream_offsets_are_stable_without_changes(make_container) -> None:
     name, container = make_container()
     write(container, 0, 20)
@@ -477,11 +471,8 @@ def test_stream_all_versions_and_deletes(make_container) -> None:
     )
 
 
-# -- initial snapshot -------------------------------------------------------------------------------
-
-
 def _merge_latest(rows: list[dict[str, Any]]) -> dict[tuple[Any, Any], int]:
-    """Latest row per (pk, id) by struct(operation <> 'snapshot', _ts, lsn); a delete means absent."""
+    """Pick the latest row per (pk, id) by ``struct(operation <> 'snapshot', _ts, lsn)``; a delete means absent."""
     best: dict[tuple[Any, Any], dict[str, Any]] = {}
     for r in rows:
         key = (r["pk"], r["id"])
@@ -504,7 +495,7 @@ def _run_snapshot_batch(
     before_read: Callable[[list[Any]], None] = lambda parts: None,
     on_row: Callable[[int, tuple], None] = lambda i, row: None,
 ) -> list[tuple]:
-    """Batch 0 as Spark runs it: log the offsets, plan, then read each partition in a fresh executor."""
+    """Run batch 0 as Spark does: log the offsets, plan, then read each partition in a fresh executor."""
     from cosmosdb_datasource import client as client_module
 
     h.offset_log.append((start, end))
@@ -699,9 +690,6 @@ def test_initial_snapshot_all_versions_with_concurrent_writes_converges(make_con
     with pytest.raises(CosmosHttpResponseError) as info:
         list(container.query_items("SELECT * FROM c", feed_range=feed_range_dict("", "FF"), session_token=future))
     assert (info.value.status_code, info.value.sub_status) == (404, 1002)
-
-
-# -- local SparkSession -----------------------------------------------------------------------------
 
 
 @pytest.mark.spark

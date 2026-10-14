@@ -28,8 +28,7 @@ Every later offset omits the field. Snapshot partitions are planned only for a m
 is an initial offset and whose end carries ``"snapshot"``, i.e. only for batch 0, and only if batch 0
 was *planned* with a snapshot. That decision and the session tokens therefore come from the logged end
 offset, so a replay of batch 0 after a restart reads the snapshot again with the original tokens, even
-if the option was changed in between. Offsets without the field (all offsets written by 0.1.x) mean
-"no snapshot". Offsets without a snapshot serialize exactly as in 0.1.x.
+if the option was changed in between. Offsets without the field mean "no snapshot".
 """
 
 from __future__ import annotations
@@ -89,7 +88,7 @@ class SnapshotState:
         return cls(tuple(session.items()))
 
     def session_token_for(self, lo: str, hi: str) -> str | None:
-        """Compound session token of every recorded range overlapping ``[lo, hi)`` (None if none).
+        """Return the compound session token of every recorded range overlapping ``[lo, hi)`` (None if none).
 
         Without a split since the start was resolved, exactly one range overlaps. After a split the
         parent's token is sent for the children (see docs/DESIGN.md, "Initial snapshot").
@@ -200,7 +199,6 @@ def rekey(offset: Offset, physical: list[tuple[str, str]]) -> Offset:
 
 
 def min_overlapping_lsn(target: Offset, lo: str, hi: str) -> int:
-    """Smallest LSN of any ``target`` range overlapping ``[lo, hi)``."""
     values = [r.lsn for r in target.ranges if r.lo < hi and lo < r.hi]
     if not values:
         raise CosmosOffsetError(f"No target range overlaps [{lo!r}, {hi!r}).")

@@ -32,9 +32,8 @@ class CosmosOffsetError(CosmosChangeFeedError):
     """A checkpointed streaming offset cannot be used with the current container or options."""
 
 
-# Patterns that look like credentials even when we do not know the literal value.
-# The bracketed first letters keep secret scanners from matching these sources; the regexes are
-# unchanged ("[s]" matches "s").
+# Credential-like substrings, masked even when the literal secret is unknown. The bracketed first
+# letters keep secret scanners from matching these sources ("[s]" matches "s").
 _SECRET_PATTERNS = [
     # Signature parameter of the Cosmos master-key and AAD authorization headers ("type=master&ver=1.0&...").
     re.compile(r"([s]ig=)[^&\s'\"]+", re.IGNORECASE),

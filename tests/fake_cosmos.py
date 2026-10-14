@@ -113,7 +113,6 @@ class FakeCosmosStore:
         self.path: str | None = None
         self._before_query_page: Callable[[], None] | None = None  # in-memory only
 
-    # -- persistence ------------------------------------------------------------------------
     def register(self) -> FakeCosmosStore:
         with _LOCK:
             _REGISTRY[self.name] = self
@@ -152,7 +151,6 @@ class FakeCosmosStore:
         ]
         return store
 
-    # -- writes -----------------------------------------------------------------------------
     def _epk(self, pk_value: Any) -> str:
         return self._pk._get_epk_range_for_partition_key(pk_value).min
 
@@ -240,7 +238,6 @@ class FakeCosmosStore:
             next(p for p in self.partitions if p.id == partition_id).lsn += n
             self.save()
 
-    # -- views ------------------------------------------------------------------------------
     def log_call(self, *entry: Any) -> None:
         with _LOCK:
             self.call_log.append(list(entry))
@@ -263,7 +260,7 @@ def session_token(part: Partition, lsn: int) -> str:
 
 
 def _required_lsn(token: str | None, part: Partition) -> int | None:
-    """LSN demanded by a (compound) session token for ``part`` (its own or a split parent's entry)."""
+    """Return the LSN a (compound) session token demands for ``part`` (its own or a split parent's entry)."""
     if not token:
         return None
     by_id = {}
@@ -310,7 +307,6 @@ class FakeBackend:
             self._store.path = os.path.join(os.environ.get("FAKE_COSMOS_DIR", ""), f"{self._store.name}.json")
         return self._store
 
-    # -- faults -----------------------------------------------------------------------------
     def _request(self, name: str = "") -> FakeCosmosStore:
         store = self.store
         with _LOCK:
@@ -335,7 +331,6 @@ class FakeBackend:
             store.lag_requests -= 1
             store.save()
 
-    # -- metadata ---------------------------------------------------------------------------
     def properties(self, refresh: bool = False) -> dict[str, Any]:
         store = self._request("properties") if self.store.throttle_calls.get("properties") else self.store
         return {"id": store.name, "_rid": store.rid, "partitionKey": dict(store.pk_def)}
@@ -353,11 +348,10 @@ class FakeBackend:
         store = self._request("feed_ranges") if self.store.throttle_calls.get("feed_ranges") else self.store
         return [(p.lo, p.hi) for p in store.partitions]
 
-    # -- query ------------------------------------------------------------------------------
     def query_pages(
         self, query, parameters, rng, page_size, continuation=None, session_token=None
     ) -> Iterator[QueryPage]:
-        """``SELECT *`` semantics; the continuation is the (EPK, id) key of the last returned document."""
+        """Serve ``SELECT *`` pages; the continuation is the (EPK, id) key of the last returned document."""
         lo, hi = rng
         after = tuple(json.loads(continuation)) if continuation else None
         while True:
@@ -392,7 +386,6 @@ class FakeBackend:
             if not more:
                 return
 
-    # -- change feed ------------------------------------------------------------------------
     def _entries(
         self, store: FakeCosmosStore, part: Partition, lo: str, hi: str, after: int, mode: str, visible: int
     ) -> list[Version]:

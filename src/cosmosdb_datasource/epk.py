@@ -35,7 +35,7 @@ def normalize_epk(value: str) -> str:
 
 
 def range_key(lo: str, hi: str) -> str:
-    """Stable, human-readable identifier of an EPK range (used as streaming offset key)."""
+    """Return a stable, human-readable identifier of an EPK range (used as streaming offset key)."""
     return f"{lo}-{hi}"
 
 
@@ -51,7 +51,7 @@ def _to_int(value: str, width: int) -> int:
 
 
 def _effective_bounds(lo: str, hi: str, kind: str, version: int) -> tuple[str, str]:
-    """Bounds used to compute *balanced* boundaries (never used for correctness).
+    """Return the bounds used to compute *balanced* boundaries (never used for correctness).
 
     V2 and MultiHash hashes clear the two most significant bits of the first byte
     (``hash_bytes[0] &= 0x3F`` in ``azure/cosmos/partition_key.py``), so real EPKs are < "40"
@@ -88,7 +88,7 @@ def _filter_increasing(lo: str, hi: str, points: Iterable[str]) -> list[str]:
 
 @lru_cache(maxsize=1)
 def _v1_grid() -> tuple[str, ...]:
-    """EPK prefixes of evenly spaced 32-bit hash values for hash-V1 containers.
+    """Return the EPK prefixes of evenly spaced 32-bit hash values for hash-V1 containers.
 
     A V1 EPK is the binary encoding of ``[float(murmur3_32(pk)), *pk_components]``, so documents
     are ordered by hash value and ``encode([float(h)])`` is a lower bound for every document
@@ -137,7 +137,7 @@ def split_range(lo: str, hi: str, n: int, *, kind: str = "Hash", version: int = 
 
 
 def is_cover(ranges: Sequence[tuple[str, str]]) -> bool:
-    """True if ``ranges`` (sorted) exactly tile ``["", "FF")``."""
+    """Return True if ``ranges`` (sorted) exactly tile ``["", "FF")``."""
     if not ranges or ranges[0][0] != MIN_EPK or ranges[-1][1] != MAX_EPK:
         return False
     for (_, hi), (lo, _) in pairwise(ranges):
@@ -159,9 +159,9 @@ def split_at_boundaries(lo: str, hi: str, boundaries: Sequence[str]) -> list[tup
 
 
 def overlay(left: Sequence[tuple[str, str]], right: Sequence[tuple[str, str]]) -> list[tuple[str, str, int, int]]:
-    """Common refinement of two covers of the EPK space.
+    """Return the common refinement of two covers of the EPK space.
 
-    Returns ``(lo, hi, i, j)`` for every non-empty intersection of ``left[i]`` and ``right[j]``.
+    Items are ``(lo, hi, i, j)`` for every non-empty intersection of ``left[i]`` and ``right[j]``.
     Both inputs must be sorted and tile ``["", "FF")``.
     """
     if not is_cover(left) or not is_cover(right):

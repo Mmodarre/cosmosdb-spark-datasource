@@ -496,5 +496,5 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
 
 
 def redacted_options(options: Mapping[str, Any] | None) -> dict[str, str]:
-    """Copy of the raw options that is safe to log."""
+    """Return a copy of the raw options that is safe to log."""
     return {k: (REDACTED if k in SECRET_OPTIONS else v) for k, v in _normalize(options).items()}

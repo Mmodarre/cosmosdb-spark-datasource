@@ -24,8 +24,6 @@ from cosmosdb_datasource.retry import RetryPolicy, call_with_retry, is_transient
 from cosmosdb_datasource.stream import allocate_budget
 from tests.fake_cosmos import FakeHttpError
 
-# -- token codec ---------------------------------------------------------------------------------
-
 
 @pytest.mark.parametrize("mode", ["LatestVersion", "AllVersionsAndDeletes"])
 def test_built_token_is_accepted_by_the_sdk(mode: str) -> None:
@@ -65,9 +63,6 @@ def test_decode_positions_multi_child_and_errors() -> None:
     assert parse_etag_lsn('"42"') == 42 and parse_etag_lsn("42") == 42
     with pytest.raises(CosmosChangeFeedError):
         parse_etag_lsn('"abc"')
-
-
-# -- bounded read loop ---------------------------------------------------------------------------
 
 
 def lv(lsn: int, doc_id: str | None = None) -> dict:
@@ -198,9 +193,6 @@ def test_retry_classification() -> None:
     policy = RetryPolicy(max_retries=5, base_delay_seconds=1, max_backoff_seconds=8)
     for attempt in range(1, 8):
         assert 0 < policy.delay(attempt) <= 8
-
-
-# -- offsets -------------------------------------------------------------------------------------
 
 
 def make_offset(*ranges) -> Offset:
@@ -362,7 +354,6 @@ def test_snapshot_field_round_trip_is_byte_stable() -> None:
     # an empty token map (no session token reported) still marks the snapshot
     bare = Offset.from_dict({"v": 1, "rid": "r", "mode": "m", "ranges": {"-FF": 1}, "snapshot": {"session": {}}})
     assert bare.snapshot == SnapshotState() and bare.snapshot.session_token_for("", "FF") is None
-    # rekey keeps the marker
     assert rekey(initial, [("", "20"), ("20", "40"), ("40", "FF")]).snapshot == initial.snapshot
 
 
