@@ -4,7 +4,6 @@ Readers depend only on this small interface (also implemented by the test fake),
 SDK-specific behaviour in one place:
 
 * ``properties()``                 container properties (``_rid``, ``partitionKey``)
-* ``quota()``                      ``x-ms-resource-usage`` sizes, if reported
 * ``feed_ranges(force_refresh)``   physical partition EPK ranges, sorted
 * ``query_pages(...)``             query pages for one EPK range, resumable by continuation,
                                    optionally pinned to a session token; each page names the
@@ -70,19 +69,6 @@ def _charge(headers: Any) -> float:
         return 0.0
 
 
-def parse_resource_usage(header: str | None) -> dict[str, int]:
-    """Parse ``x-ms-resource-usage`` (``documentsSize=...;documentsCount=...``; sizes in KB)."""
-    out: dict[str, int] = {}
-    for part in (header or "").split(";"):
-        name, sep, value = part.partition("=")
-        if sep:
-            try:
-                out[name.strip()] = int(value.strip())
-            except ValueError:
-                continue
-    return out
-
-
 class SdkBackend:
     def __init__(self, container: Any, *, priority: str | None = None) -> None:
         self._container = container
@@ -100,23 +86,6 @@ class SdkBackend:
     @property
     def rid(self) -> str:
         return str(self.properties()["_rid"])
-
-    def quota(self) -> dict[str, int] | None:
-        captured: dict[str, Any] = {}
-
-        def hook(headers: Any, _body: Any) -> None:
-            captured["usage"] = headers.get("x-ms-resource-usage")
-
-        try:
-            props = self._container.read(populate_quota_info=True, response_hook=hook)
-        except Exception as exc:  # noqa: BLE001 - size is only a planning hint
-            logger.warning(
-                "Could not read container quota info (%s); size-based planning disabled.", type(exc).__name__
-            )
-            return None
-        self._properties = dict(props)
-        usage = parse_resource_usage(captured.get("usage"))
-        return usage or None
 
     def feed_ranges(self, force_refresh: bool = False) -> list[tuple[str, str]]:
         ranges = []

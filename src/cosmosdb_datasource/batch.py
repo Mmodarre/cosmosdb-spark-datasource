@@ -218,7 +218,7 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
         props = self._driver_call("reading container properties", lambda: backend.properties(refresh=True))
         pk = PartitionKeyInfo.from_container_properties(props)
         ranges = self._driver_call("reading feed ranges", lambda: backend.feed_ranges(force_refresh=True))
-        splits = self._splits_per_range(backend, len(ranges))
+        splits = self._splits_per_range()
         parts = [
             CosmosQueryPartition(i, lo, hi, epk.range_key(*feed), pk, token)
             for i, (feed, (lo, hi)) in enumerate(split_feed_ranges(ranges, splits, pk))

@@ -11,7 +11,6 @@ offsets); that is safe because executor copies come from a separate, never-plann
 from __future__ import annotations
 
 import logging
-import math
 import time
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -27,8 +26,7 @@ from cosmosdb_datasource.schema import RowBuilder, validate_schema
 
 logger = logging.getLogger("cosmosdb_datasource")
 
-AUTO_TARGET_BYTES_PER_PARTITION = 1 << 30  # 1 GiB of stored documents per Spark task
-AUTO_MAX_SPLITS_PER_FEED_RANGE = 64
+_warned_sub_split = False  # the RU warning for sub-splitting is logged once per process
 
 _T = TypeVar("_T")
 
@@ -51,26 +49,27 @@ class CosmosReaderBase:
         """Run a driver-side metadata request, retried on transient errors (throttling, timeouts, 5xx)."""
         return call_with_retry(fn, self._retry_policy(), what)
 
-    def _splits_per_range(self, backend: Any, n_ranges: int) -> int:
+    def _splits_per_range(self) -> int:
+        """Return the EPK sub-ranges per physical partition for query reads (batch, snapshots).
+
+        The service answers an EPK-filtered query by scanning the whole physical partition, so every
+        sub-range costs about the RU of a scan of the partition (measured: 2, 8 and 16 sub-ranges cost
+        2.0, 6.3 and 12 times the RU of one, without a shorter read). ``auto`` therefore reads each
+        physical partition as one task.
+        """
         factor = self._opts.partitions_per_feed_range
-        if factor != AUTO:
-            return int(factor)
-        usage = backend.quota()
-        size_kb = None
-        if usage:
-            size_kb = usage.get("documentsSize") or usage.get("collectionSize")
-        if not size_kb:
-            logger.warning("partitions_per_feed_range=auto: container size unavailable; using 1.")
+        if factor == AUTO:
             return 1
-        per_range_bytes = size_kb * 1024 / max(1, n_ranges)
-        splits = math.ceil(per_range_bytes / AUTO_TARGET_BYTES_PER_PARTITION)
-        splits = max(1, min(AUTO_MAX_SPLITS_PER_FEED_RANGE, splits))
-        logger.info(
-            "partitions_per_feed_range=auto: %.1f GiB across %d feed ranges -> %d split(s) per range",
-            size_kb / (1 << 20),
-            n_ranges,
-            splits,
-        )
+        splits = int(factor)
+        global _warned_sub_split
+        if splits > 1 and not _warned_sub_split:
+            _warned_sub_split = True
+            logger.warning(
+                "partitions_per_feed_range=%d: each EPK sub-range query scans its whole physical partition, "
+                "so a full read costs about %d times the RU of partitions_per_feed_range=1.",
+                splits,
+                splits,
+            )
         return splits
 
     def _backend(self, token: SecretToken | None) -> Any:

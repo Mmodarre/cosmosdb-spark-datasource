@@ -201,7 +201,7 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `query` | `SELECT * FROM c` | Query run **per input partition**, for server-side filters and projections. `ORDER BY`, `GROUP BY`, `DISTINCT`, `TOP`, `OFFSET` and aggregates apply per partition, not globally; do them in Spark. |
 | `query_parameters` | | JSON list of `{"name": "@p", "value": ...}` |
 | `page_size` | `1000` | Maximum items per request (the service also caps a page at about 4 MB) |
-| `partitions_per_feed_range` | `1` | Split every physical partition into N EPK sub-ranges, for N times more tasks. `auto` targets about 1 GiB of stored documents per task (at most 64 per feed range). |
+| `partitions_per_feed_range` | `1` | Split every physical partition into N EPK sub-ranges, for N times more tasks. Each sub-range query scans its whole physical partition, so a full read costs about N times the RU of `1` (see [Sizing and performance](#sizing-and-performance)). `auto`: one task per physical partition. |
 | `mode` | `PERMISSIVE` | Conversion errors: `PERMISSIVE` (null, plus the corrupt-record column), `DROPMALFORMED` or `FAILFAST` |
 | `raw_json_column` | `body` | Name of the column holding the whole document |
 | `corrupt_record_column` | `_corrupt_record` | Column that receives the JSON of malformed documents (only if it is in the schema) |
@@ -216,7 +216,7 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `max_items_per_trigger` | unlimited | Budget of change-feed **LSNs** per micro-batch, not a row cap: bulk and transactional-batch writes commit many documents under one LSN. Does not apply to the initial snapshot. See [Per-trigger limits](#per-trigger-limits). |
 | `initial_snapshot` | `false` | Read the whole container in the first micro-batch, then the change feed from the position the stream started at |
 | `initial_snapshot_delay_seconds` | `5` | No snapshot read starts earlier than this after the start position was resolved; protects against replica lag where session tokens do not apply (`ConsistentPrefix`, `Eventual`). `0` disables it. |
-| `partitions_per_feed_range` | `1` | EPK sub-splitting of change-feed reads (an integer; `auto` means 1 for them). The initial snapshot is split like a batch read, `auto` included. |
+| `partitions_per_feed_range` | `1` | EPK sub-splitting of change-feed reads (an integer; `auto` means 1). The initial snapshot is split like a batch read. |
 | `page_size` | `1000` | Maximum change-feed items per request |
 | `change_feed_end_wait_seconds` | `120` | How long a task waits for a lagging replica to reach the micro-batch's end LSN before it fails (Spark then retries the task) |
 | `mode`, `raw_json_column`, `corrupt_record_column`, `log_metrics` | as above | |
@@ -501,12 +501,17 @@ snapshots = spark.readStream.format("cosmosdb").options(**conn, container="custo
 
 ## Sizing and performance
 
-- **Parallelism**: one task per physical partition; `partitions_per_feed_range=N` splits each into
-  N EPK sub-ranges (hash V1, V2 and hierarchical keys are balanced). `auto` targets about 1 GiB of
-  stored documents per task. Stop increasing N once RU, not tasks, is the bottleneck.
+- **Parallelism**: one task per physical partition. `partitions_per_feed_range=N` splits each into
+  N EPK sub-ranges (hash V1, V2 and hierarchical keys are balanced), but the service answers every
+  EPK-filtered query by scanning the whole physical partition: each sub-range costs about the RU of
+  a scan of the partition, and the scan is not faster. Measured on 10M documents in 17 partitions
+  (100,000 RU/s): N = 2, 8 and 16 cost 2.0, 6.3 and 12 times the RU of N = 1, and took as long or
+  longer because of throttling. Sub-split only when one task per partition is too slow on the
+  Spark side (row conversion) and the RU are affordable; a WARNING states the cost. `auto` reads
+  each physical partition as one task. Sub-splitting of change-feed reads has not been measured.
 - **Request units**: throughput is shared by all tasks and capped per physical partition (10,000
-  RU/s). Measured on 400 RU/s containers: `SELECT *` costs about 23 RU per 1,000 documents of
-  0.55 KB and about 39 RU per 1,000 documents of 1.4 KB; the change feed about 58 RU per 1,000
+  RU/s). Measured on 400 RU/s containers with one task per partition: `SELECT *` costs about 23 RU
+  per 1,000 documents of 0.55 KB and about 39 RU per 1,000 documents of 1.4 KB; the change feed about 58 RU per 1,000
   changes (LatestVersion from `Beginning`). A full read of 1M documents of 0.55 KB is therefore
   about 23,000 RU, about one minute at 400 RU/s; the same applies to an initial snapshot.
 - Raise (auto)scale throughput temporarily for initial loads, use `priority=Low` to protect OLTP

@@ -28,6 +28,10 @@ First public release.
 
 ### Fixed
 
+- `partitions_per_feed_range=auto` split large physical partitions into EPK sub-ranges, and every
+  sub-range query costs about as much RU as a scan of the whole partition (10 sub-ranges: about 10
+  times the RU, and no faster). `auto` now reads each physical partition as one task, an explicit
+  value above 1 logs a WARNING with the cost, and the trade-off is documented.
 - A partition split while a batch read, an initial snapshot or a snapshot stream was reading a
   partition returned rows twice: azure-cosmos 4.17.1 restarts a split range from its beginning
   (4.14.0 raises 410 and then misroutes the continuation). Every query is now scoped to one

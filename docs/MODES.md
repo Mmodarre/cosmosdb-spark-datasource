@@ -81,9 +81,9 @@ optional `query` (for example `SELECT * FROM c WHERE c.type = 'order'`) runs onc
 partition, so `ORDER BY`, `GROUP BY`, `DISTINCT`, `TOP` and aggregates apply per partition.
 
 **Guarantees and limitations.**
-- One Spark task per physical partition, optionally split by EPK (`partitions_per_feed_range`,
-  `auto` targets about 1 GiB per task). Rows are streamed page by page; transient errors resume
-  from the last page.
+- One Spark task per physical partition, optionally split by EPK (`partitions_per_feed_range`;
+  each sub-range costs about the RU of a scan of the whole partition). Rows are streamed page by
+  page; transient errors resume from the last page.
 - Not a point-in-time snapshot: a document changed during the scan may be read before or after the
   change, and a document created during the scan may be missing. A document that is not modified
   during the scan is read exactly once.
@@ -97,11 +97,7 @@ reconciliation (a full compare of a container with a table, see the
 [reconcile job](../examples/databricks-bundle/README.md#reconcile-job)).
 
 ```python
-customers = (
-    spark.read.format("cosmosdb")
-    .options(**conn, container="customers", partitions_per_feed_range="auto", priority="Low")
-    .load()
-)
+customers = spark.read.format("cosmosdb").options(**conn, container="customers", priority="Low").load()
 ```
 
 SDP, snapshot to SCD2 ([example](../examples/databricks-bundle/src/pipelines/customers_scd2/customers_scd2.py)):
@@ -388,11 +384,7 @@ first update and on a full refresh, and a materialized view replaces its content
 example to rebuild the history later.
 
 ```python
-snapshots = (
-    spark.readStream.format("cosmosdb")
-    .options(**conn, container="customers", snapshot_stream="true", partitions_per_feed_range="auto")
-    .load()
-)
+snapshots = spark.readStream.format("cosmosdb").options(**conn, container="customers", snapshot_stream="true").load()
 (
     snapshots.writeStream.option("checkpointLocation", "/Volumes/<catalog>/<schema>/<volume>/customers_snapshots")
     .trigger(availableNow=True)  # one new snapshot per run
