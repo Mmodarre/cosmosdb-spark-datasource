@@ -468,6 +468,25 @@ def test_stream_latest_version_incremental_and_restart(make_container) -> None:
     assert sorted(h.column(h.run_batch(), "id")) == ["d130", "d131", "d132"]
 
 
+def test_stream_start_from_in_the_future(make_container) -> None:
+    """A stream configured to start at a time that has not come yet delivers only changes from then on."""
+    from datetime import datetime, timedelta, timezone
+
+    name, container = make_container()
+    start = (datetime.now(timezone.utc) + timedelta(seconds=45)).replace(microsecond=0)
+    h = StreamHarness(options(name, start_from=start.strftime("%Y-%m-%dT%H:%M:%SZ")))
+    h.start()
+    write(container, 0, 5)
+    written = {
+        d["id"]: d["_ts"] for d in container.query_items("SELECT c.id, c._ts FROM c", enable_cross_partition_query=True)
+    }
+    expected = sorted(i for i, ts in written.items() if ts >= start.timestamp())  # empty unless the endpoint is slow
+    assert sorted(h.column(h.run_until_idle(), "id")) == expected
+    time.sleep(max(0.0, (start - datetime.now(timezone.utc)).total_seconds()) + 3)
+    write(container, 10, 5)
+    assert sorted(h.column(h.run_until_idle(), "id")) == [f"d{i}" for i in range(10, 15)]
+
+
 def test_stream_max_items_per_trigger(make_container) -> None:
     name, container = make_container()
     write(container, 0, 150)

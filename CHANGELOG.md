@@ -43,6 +43,9 @@ First public release.
 - Change-feed reads took the continuation from the client-wide `last_response_headers`, which
   concurrent reads on the shared client of a worker overwrite. Each pager now reads it from its
   own last response, and the start probes of a new stream run in parallel.
+- `start_from` with a timestamp in the future behaved like `Now`: the changes made between the
+  start of the stream and that time were delivered. The stream now drops the changes with an
+  earlier `_ts`; the bound is stored in the offsets.
 - `partitions_per_feed_range=auto` split large physical partitions into EPK sub-ranges, and every
   sub-range query costs about as much RU as a scan of the whole partition (10 sub-ranges: about 10
   times the RU, and no faster). `auto` now reads each physical partition as one task, an explicit

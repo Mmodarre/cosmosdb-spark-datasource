@@ -136,6 +136,8 @@ class Offset:
     initial: bool = False  # produced by initialOffset()
     init: tuple[RangeState, ...] | None = None  # original start of batch 0 (see module doc)
     snapshot: SnapshotState | None = None  # initial snapshot pending (initial) / planned (end of batch 0)
+    # start_from as a timestamp: changes with an earlier _ts (epoch seconds) are not read.
+    not_before: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ranges", _ordered_cover(self.ranges, "ranges"))
@@ -155,6 +157,8 @@ class Offset:
             out["init"] = {r.key: r.lsn for r in self.init}
         if self.snapshot is not None:
             out["snapshot"] = self.snapshot.to_dict()
+        if self.not_before is not None:
+            out["not_before"] = self.not_before
         return out
 
     def same_position(self, other: Offset) -> bool:
@@ -178,7 +182,18 @@ class Offset:
         rid, mode = data.get("rid"), data.get("mode")
         if not isinstance(rid, str) or not isinstance(mode, str):
             raise CosmosOffsetError("Offset is missing 'rid' or 'mode'.")
-        return cls(rid=rid, mode=mode, ranges=ranges, initial=data.get("initial") is True, init=init, snapshot=snapshot)
+        not_before = data.get("not_before")
+        if not_before is not None and (isinstance(not_before, bool) or not isinstance(not_before, int)):
+            raise CosmosOffsetError(f"Offset field 'not_before' must be an integer, got {not_before!r}.")
+        return cls(
+            rid=rid,
+            mode=mode,
+            ranges=ranges,
+            initial=data.get("initial") is True,
+            init=init,
+            snapshot=snapshot,
+            not_before=not_before,
+        )
 
     def validate_for(self, rid: str, mode: str) -> None:
         if self.rid != rid:
@@ -211,7 +226,13 @@ def rekey(offset: Offset, physical: list[tuple[str, str]]) -> Offset:
         for lo, hi in epk.split_at_boundaries(r.lo, r.hi, boundaries):
             out.append(RangeState(lo, hi, r.lsn))
     return Offset(
-        offset.rid, offset.mode, tuple(out), initial=offset.initial, init=offset.init, snapshot=offset.snapshot
+        offset.rid,
+        offset.mode,
+        tuple(out),
+        initial=offset.initial,
+        init=offset.init,
+        snapshot=offset.snapshot,
+        not_before=offset.not_before,
     )
 
 

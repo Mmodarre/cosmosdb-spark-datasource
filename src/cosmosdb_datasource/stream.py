@@ -113,6 +113,7 @@ class CosmosChangeFeedPartition(InputPartition):
         rid: str,
         pk: PartitionKeyInfo,
         token: SecretToken | None,
+        not_before: int | None = None,
     ) -> None:
         super().__init__(index)
         self.index = index
@@ -124,6 +125,7 @@ class CosmosChangeFeedPartition(InputPartition):
         self.rid = rid
         self.pk = pk
         self.token = token
+        self.not_before = not_before
 
 
 class CosmosSnapshotPartition(CosmosQueryPartition):
@@ -244,6 +246,7 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
                 tuple(RangeState(lo, hi, lsn) for (lo, hi), (lsn, _tok) in zip(ranges, resolved, strict=True)),
                 initial=True,
                 snapshot=snapshot,
+                not_before=int(opts.start_from_datetime.timestamp()) if opts.start_from_datetime else None,
             )
             logger.info(
                 "cosmosdb change feed initial offset (start_from=%s, initial_snapshot=%s): %d range(s)",
@@ -280,7 +283,9 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
             # First batch with an initial snapshot: it reads only the snapshot, so its change-feed end
             # equals its start (no per-trigger budget or AvailableNow target applies). The end carries
             # the original start ("init") and the snapshot record.
-            return Offset(rid, mode, base.ranges, init=base.ranges, snapshot=base.snapshot).to_dict()
+            return Offset(
+                rid, mode, base.ranges, init=base.ranges, snapshot=base.snapshot, not_before=base.not_before
+            ).to_dict()
         starts = [r.lsn for r in refined.ranges]
         ends = allocate_budget(starts, currents, self._cap(limit))
         if self._target is not None and not self._target_refreshed and base.snapshot is not None:
@@ -302,8 +307,8 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         if base.initial:
             # First batch: remember where it starts, so a replay after a restart (where Spark calls
             # initialOffset() again in a new process) uses exactly the same start.
-            return Offset(rid, mode, new_ranges, init=base.ranges).to_dict()
-        end = Offset(rid, mode, new_ranges)
+            return Offset(rid, mode, new_ranges, init=base.ranges, not_before=base.not_before).to_dict()
+        end = Offset(rid, mode, new_ranges, not_before=base.not_before)
         if end.ranges == base.ranges:
             return base.to_dict()  # byte-identical: Spark sees "no new data"
         return end.to_dict()
@@ -360,7 +365,11 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
                 continue
             key = end_offset.ranges[j].key
             for a, b in epk.split_range(lo, hi, splits, kind=pk.kind, version=pk.version):
-                parts.append(CosmosChangeFeedPartition(len(parts), a, b, key, s_lsn, e_lsn, rid, pk, token))
+                parts.append(
+                    CosmosChangeFeedPartition(
+                        len(parts), a, b, key, s_lsn, e_lsn, rid, pk, token, not_before=end_offset.not_before
+                    )
+                )
         if snapshot is not None:
             self._await_snapshot_delay()
         logger.info("cosmosdb micro-batch planned: %d partition(s)", len(parts))
@@ -454,6 +463,7 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
             ),
         )
         emitted = 0
+        skipped_before_start = 0
         group_lsn: int | None = None
         group: collections.Counter[tuple[str | None, str | None]] = collections.Counter()
         for item in items:
@@ -465,6 +475,11 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
                 group.clear()
             rec.lsn_seq = group[(rec.pk, rec.id)]
             group[(rec.pk, rec.id)] += 1
+            # A start_from later than the position the stream started at: the service has no position for
+            # a future time, so the stream starts at "now" and the earlier changes are dropped here.
+            if partition.not_before is not None and rec.ts is not None and rec.ts < partition.not_before:
+                skipped_before_start += 1
+                continue
             row = builder.build(_view(rec, partition.feed_range))
             if row is not None:
                 emitted += 1
@@ -478,6 +493,7 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
             retries=stats.retries,
             lag_waits=stats.lag_waits,
             skipped_beyond_end=stats.skipped_beyond_end,
+            skipped_before_start=skipped_before_start,
         )
 
     def _read_snapshot(self, partition: CosmosSnapshotPartition) -> Iterator[tuple[Any, ...]]:
