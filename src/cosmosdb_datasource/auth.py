@@ -130,6 +130,14 @@ def build_token_credential(auth: AuthOptions) -> Any:
     """Build the long-lived azure TokenCredential for the auth type (None for key / access_token)."""
     if auth.auth_type == AUTH_SERVICE_PRINCIPAL:
         identity = _identity_module()
+        if auth.client_certificate:
+            assert auth.tenant_id is not None and auth.client_id is not None
+            return identity.CertificateCredential(
+                tenant_id=auth.tenant_id,
+                client_id=auth.client_id,
+                certificate_data=base64.b64decode(auth.client_certificate),
+                password=auth.client_certificate_password,
+            )
         return identity.ClientSecretCredential(
             tenant_id=auth.tenant_id, client_id=auth.client_id, client_secret=auth.client_secret
         )
@@ -223,8 +231,9 @@ def mint_driver_token(auth: AuthOptions, endpoint: str) -> SecretToken | None:
             )
         return token
     key = identity_key(auth, endpoint)
-    if auth.client_secret:  # a rotated secret must not keep using a credential built from the old one
-        key = (*key, hashlib.sha256(auth.client_secret.encode()).hexdigest())
+    secret = auth.client_secret or auth.client_certificate
+    if secret:  # a rotated secret must not keep using a credential built from the old one
+        key = (*key, hashlib.sha256(secret.encode()).hexdigest())
     return _DRIVER_TOKENS.token(key, lambda: build_token_credential(auth), endpoint, auth.secrets())
 
 

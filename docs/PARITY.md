@@ -18,9 +18,9 @@ source).
 
 | Status | Rows |
 |---|---|
-| Supported | 25 |
+| Supported | 27 |
 | Partially | 11 |
-| Missing | 5 |
+| Missing | 3 |
 | N/A | 4 |
 | Not verified | 1 |
 
@@ -32,7 +32,7 @@ source).
 |---|---|---|---|
 | Account key | `spark.cosmos.auth.type=MasterKey`, `spark.cosmos.accountKey` | **Supported**: `auth_type=key`, `account_key` | |
 | Service principal, secret | `ServicePrincipal`, `spark.cosmos.auth.aad.clientId`, `.clientSecret`, `spark.cosmos.account.tenantId` (plus subscription and resource group) | **Supported**: `auth_type=service_principal`, `tenant_id`, `client_id`, `client_secret` | Data-plane RBAC only: no subscription or resource group. Unit-tested. |
-| Service principal, certificate | `spark.cosmos.auth.aad.clientCertPemBase64` | **Missing** | |
+| Service principal, certificate | `spark.cosmos.auth.aad.clientCertPemBase64` | **Supported**: `client_certificate` (base64 PEM or PKCS#12), `client_certificate_password` | `CertificateCredential`; unit-tested with a real certificate, not against Entra ID. |
 | Managed identity | `ManagedIdentity`, optional `spark.cosmos.auth.aad.clientId` / `resourceId` | **Partially**: `auth_type=default` (`DefaultAzureCredential`, which includes managed identity) | Tested with the Azure CLI credential, not with a managed identity. |
 | Custom token provider | `AccessToken` with `spark.cosmos.accountDataResolverServiceName` (a JVM class) | **Supported**: `auth_type=access_token` (pre-minted token), `auth_type=service_credential` (Unity Catalog service credential) | |
 
@@ -52,7 +52,7 @@ source).
 | Logical-partition scoping | `spark.cosmos.partitioning.feedRangeFilter`; UDFs `GetFeedRangeForPartitionKeyValue`, `GetFeedRangeForHierarchicalPartitionKeyValues`, `GetOverlappingFeedRange` | **Supported**: `partition_key` (a key or a hierarchical prefix), and pushed `pk = 'v'` / `pk IN (...)` | One task, routed by partition key: 4.3 RU for a 50-document partition; an EPK-range query for the same key scans its physical partition (2,386 RU). |
 | readMany / point reads | `spark.cosmos.read.readManyFiltering.enabled`, `_itemIdentity`, UDF `GetCosmosItemIdentityValue`; `readManyByPartitionKeys` | **Supported**: `item_ids` option; `read_many(identities, ...)` for a DataFrame of `(id, pk)` | Through `read_items`: 1,000 items for 301 RU. No `_itemIdentity` column; `readManyByPartitionKeys` maps to `partition_key`. |
 | Runtime filtering | `spark.cosmos.read.runtimeFiltering.enabled` | **N/A** | No runtime-filter hook in the Python API. |
-| Integrated cache | `spark.cosmos.read.maxIntegratedCacheStalenessInMS` | **Missing** | |
+| Integrated cache | `spark.cosmos.read.maxIntegratedCacheStalenessInMS` | **Supported**: `max_integrated_cache_staleness_ms` on queries | Needs a dedicated-gateway endpoint; accepted, and ignored, by the standard gateway (checked on an account without one). |
 | Page size | `spark.cosmos.read.maxItemCount` (1000) | **Supported**: `page_size` (5000) | Both libraries read fastest with 5,000-item pages in the benchmark. |
 | Consistency | `spark.cosmos.read.forceEventualConsistency` (default `true`), `.consistencyStrategy` | **Supported**: `consistency_level` (default: the account's) | Same RU per read at Session and Eventual. |
 | Preferred regions | `spark.cosmos.preferredRegionsList` | **Supported**: `preferred_regions` | |
@@ -92,7 +92,7 @@ transactional batch, point writes, serialization options and streaming writes
 
 | Capability | Connector | This data source | Notes |
 |---|---|---|---|
-| Diagnostics | `spark.cosmos.diagnostics` `sampled` / `simple` / `feed` / `feed_details`, thresholds | **Partially**: `log_metrics=true` (rows, pages, RU, retries, duration per partition) | |
+| Diagnostics | `spark.cosmos.diagnostics` `sampled` / `simple` / `feed` / `feed_details`, thresholds | **Partially**: `log_metrics=true` per partition; `slow_request_ms` logs slow page fetches with activity ids, partitions, RU, service time and throttling retries, at most `slow_request_log_per_minute` per worker | No per-request diagnostics strings of the SDK (the Python SDK has none). |
 | Azure Monitor / OpenTelemetry | `spark.cosmos.diagnostics.azureMonitor.*` | **Missing** | |
 | Spark UI custom metrics | change-feed performance metrics | **N/A** | The Python API reports only Spark's built-in Python metrics. |
 | Catalog API | `CosmosCatalog`: databases, containers, throughput | **N/A** | Spark catalogs are JVM plugins. |

@@ -17,6 +17,7 @@ SDK-specific behaviour in one place:
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,6 +31,7 @@ from cosmosdb_datasource.changefeed import (
     decode_positions,
     parse_etag_lsn,
 )
+from cosmosdb_datasource.diagnostics import SlowRequestLog
 from cosmosdb_datasource.documents import item_lsn
 from cosmosdb_datasource.errors import CosmosChangeFeedError, CosmosDataSourceError, CosmosOffsetError
 from cosmosdb_datasource.options import MODE_LATEST_VERSION
@@ -83,10 +85,20 @@ def _charge(headers: Any) -> float:
 
 
 class SdkBackend:
-    def __init__(self, container: Any, *, priority: str | None = None, prefetch_pages: int = 0) -> None:
+    def __init__(
+        self,
+        container: Any,
+        *,
+        priority: str | None = None,
+        prefetch_pages: int = 0,
+        cache_staleness_ms: int | None = None,
+        slow_requests: SlowRequestLog | None = None,
+    ) -> None:
         self._container = container
         self._priority = priority
         self._prefetch_pages = prefetch_pages
+        self._cache_staleness_ms = cache_staleness_ms
+        self._slow = slow_requests
         self._properties: dict[str, Any] | None = None
 
     def _kwargs(self) -> dict[str, Any]:
@@ -147,11 +159,14 @@ class SdkBackend:
 
     def read_items(self, items: list[tuple[str, Any]]) -> tuple[list[dict[str, Any]], float]:
         """Return the existing documents among ``(id, partition key)`` pairs, and the request charge."""
-        charges: list[float] = []
+        responses: list[Any] = []
+        started = time.monotonic()
         docs = self._container.read_items(
-            items=items, response_hook=lambda headers, _body: charges.append(_charge(headers)), **self._kwargs()
+            items=items, response_hook=lambda headers, _body: responses.append(headers), **self._kwargs()
         )
-        return [dict(d) for d in docs], sum(charges)
+        if self._slow is not None:
+            self._slow.observe("read_items", time.monotonic() - started, responses, items=len(items))
+        return [dict(d) for d in docs], sum(_charge(h) for h in responses)
 
     def key_epk(self, partition_key: Any) -> str:
         """Return the effective partition key of a (full) partition key value."""
@@ -174,6 +189,7 @@ class SdkBackend:
         charges: list[float] = []
         served: list[str] = []
         times: list[float | None] = []
+        responses: list[Any] = []
 
         def hook(headers: Any, _body: Any) -> None:
             charges.append(_charge(headers))
@@ -181,18 +197,28 @@ class SdkBackend:
             if pk_range and str(pk_range) not in served:
                 served.append(str(pk_range))
             times.append(_server_time(headers))
+            responses.append(headers)
 
         kwargs: dict[str, Any] = dict(self._kwargs())
         if parameters:
             kwargs["parameters"] = parameters
         if session_token:
             kwargs["session_token"] = session_token
+        if self._cache_staleness_ms is not None:
+            kwargs["max_integrated_cache_staleness_in_ms"] = self._cache_staleness_ms
         pager = self._container.query_items(
             query=query, max_item_count=page_size, response_hook=hook, **scope, **kwargs
         )
         pages = pager.by_page(continuation_token=continuation) if continuation else pager.by_page()
+        fetch_started = time.monotonic()
         for page in pages:
             items = list(page)
+            if self._slow is not None:
+                rng = scope.get("feed_range", {}).get("Range")
+                where = f"{rng['min']}-{rng['max']}" if rng else f"partition_key={scope.get('partition_key')!r}"
+                self._slow.observe(
+                    "query page", time.monotonic() - fetch_started, responses, items=len(items), scope=where
+                )
             yield QueryPage(
                 items=items,
                 continuation=pages.continuation_token,
@@ -203,6 +229,8 @@ class SdkBackend:
             charges.clear()
             served.clear()
             times.clear()
+            responses.clear()
+            fetch_started = time.monotonic()
 
     def change_feed_pages(
         self,
@@ -215,10 +243,12 @@ class SdkBackend:
     ) -> Iterator[ChangeFeedPage]:
         charges: list[float] = []
         last: list[Any] = [None]
+        responses: list[Any] = []
 
         def hook(headers: Any, _body: Any) -> None:
             charges.append(_charge(headers))
             last[0] = headers
+            responses.append(headers)
 
         if container_rid is not None:
             self.ensure_rid(container_rid)
@@ -228,12 +258,23 @@ class SdkBackend:
             continuation=token, max_item_count=page_size, response_hook=hook, **self._kwargs()
         )
         pages = pager.by_page()
+        fetch_started = time.monotonic()
         for page in pages:
             items = list(page)
+            if self._slow is not None:
+                self._slow.observe(
+                    "change feed page",
+                    time.monotonic() - fetch_started,
+                    responses,
+                    items=len(items),
+                    range=f"{rng[0]}-{rng[1]}",
+                )
             tok = _continuation(last[0])
             charge = sum(charges)
             charges.clear()
+            responses.clear()
             yield ChangeFeedPage(items=items, positions=decode_positions(tok), resume_token=tok, request_charge=charge)
+            fetch_started = time.monotonic()
         # The pager stops on HTTP 304 without a page; the state after it is in the last response.
         tok = _continuation(last[0])
         yield ChangeFeedPage(

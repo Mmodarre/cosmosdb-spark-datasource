@@ -20,6 +20,7 @@ from typing import Any
 from cosmosdb_datasource._version import __version__
 from cosmosdb_datasource.auth import PartitionCredential, SecretToken, identity_key
 from cosmosdb_datasource.backend import SdkBackend
+from cosmosdb_datasource.diagnostics import SlowRequestLog
 from cosmosdb_datasource.errors import CosmosConfigError, CosmosDataSourceError, redact
 from cosmosdb_datasource.options import AUTH_ACCESS_TOKEN, AUTH_KEY, CosmosOptions
 
@@ -138,11 +139,29 @@ def get_backend(opts: CosmosOptions, token: SecretToken | None = None) -> Any:
             _CLIENTS[key] = entry
         elif entry.credential is not None:
             entry.credential.update(token)
-        backend_key = (*key, opts.database, opts.container, opts.priority, opts.prefetch_pages)
+        backend_key = (
+            *key,
+            opts.database,
+            opts.container,
+            opts.priority,
+            opts.prefetch_pages,
+            opts.max_integrated_cache_staleness_ms,
+            opts.slow_request_ms,
+            opts.slow_request_log_per_minute,
+        )
         backend = _BACKENDS.get(backend_key)
         if backend is None:
             container = entry.client.get_database_client(opts.database).get_container_client(opts.container)
-            backend = SdkBackend(container, priority=opts.priority, prefetch_pages=opts.prefetch_pages)
+            slow = (
+                SlowRequestLog(opts.slow_request_ms, opts.slow_request_log_per_minute) if opts.slow_request_ms else None
+            )
+            backend = SdkBackend(
+                container,
+                priority=opts.priority,
+                prefetch_pages=opts.prefetch_pages,
+                cache_staleness_ms=opts.max_integrated_cache_staleness_ms,
+                slow_requests=slow,
+            )
             _BACKENDS[backend_key] = backend
     return backend
 

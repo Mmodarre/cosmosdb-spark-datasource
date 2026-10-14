@@ -18,7 +18,10 @@ optionally `azure-identity`), which serverless environments and pipelines can in
 ## Features
 
 - **Batch reads**: one Spark task per physical partition (feed range), optionally split further by
-  effective partition key (EPK); a server-side `query` with parameters.
+  effective partition key (EPK); a server-side `query` with parameters; opt-in
+  [filter pushdown](#filter-pushdown); [schema inference](#schema-inference) by sampling.
+- **Logical partitions and point reads**: `partition_key`, `item_ids` and `read_many` for a
+  DataFrame of `(id, pk)` ([details](#logical-partitions-and-point-reads)).
 - **Change-feed streams** in `LatestVersion` or `AllVersionsAndDeletes` mode. Micro-batches are
   bounded by LSN per range, so a retried or replayed batch reads the same changes.
 - **Initial snapshot** (`initial_snapshot=true`): the first micro-batch reads the whole container,
@@ -27,13 +30,18 @@ optionally `azure-identity`), which serverless environments and pipelines can in
   `AllVersionsAndDeletes`.
 - **Snapshot stream** (`snapshot_stream=true`): every micro-batch is one complete snapshot of the
   container, stamped with `snapshot_ts`, so an append flow keeps a history of container states.
-- **Authentication**: account key, Entra ID service principal, pre-minted access token, Unity
-  Catalog service credential, or `DefaultAzureCredential`. Tokens are minted on the driver and
-  shipped to the tasks.
+- **Change feed as a batch read**, optionally continued from a batch checkpoint
+  ([details](#change-feed-as-a-batch-read)).
+- **Authentication**: account key, Entra ID service principal (secret or certificate), pre-minted
+  access token, Unity Catalog service credential, or `DefaultAzureCredential`. Tokens are minted on
+  the driver and shipped to the tasks.
+- **Throughput control**: `priority`, throughput buckets and a per-read RU budget
+  ([details](#throughput-control)).
 - **Typed reads**: a user-specified schema is filled from the documents with safe conversions, in
   `PERMISSIVE`, `DROPMALFORMED` or `FAILFAST` mode.
-- Rows are streamed page by page, one client is reused per Python worker, retries back off with
-  jitter and honour `x-ms-retry-after-ms`, and per-partition metrics (rows, RU, duration) can be
+- Rows are streamed page by page with the next page read ahead and handed to Spark as Arrow
+  batches, one client is reused per Python worker, retries back off with jitter and honour
+  `x-ms-retry-after-ms`, and per-partition metrics (rows, RU, duration) and slow requests can be
   logged.
 
 ## Compatibility
@@ -182,6 +190,7 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `auth_type` | inferred | `key`, `service_principal`, `access_token`, `service_credential` or `default`. Inferred when exactly one credential option is set; `default` must be explicit. See [Authentication](#authentication). |
 | `account_key` | | Account key (`auth_type=key`) |
 | `tenant_id`, `client_id`, `client_secret` | | Entra ID service principal (`auth_type=service_principal`) |
+| `client_certificate`, `client_certificate_password` | | Service principal with a certificate instead of `client_secret`: the base64 of a PEM (private key and certificate) or PKCS#12 file, and its password if it has one |
 | `access_token`, `access_token_expires_on` | | Pre-minted bearer token. Expiry in epoch seconds or ISO-8601; read from the JWT `exp` claim if omitted (`auth_type=access_token`). |
 | `service_credential` | | Unity Catalog service credential name (`auth_type=service_credential`) |
 | `preferred_regions` | account default | Comma-separated read regions, e.g. `West Europe,North Europe` |
@@ -210,6 +219,8 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `raw_json_column` | `body` | Name of the column holding the whole document |
 | `corrupt_record_column` | `_corrupt_record` | Column that receives the JSON of malformed documents (only if it is in the schema) |
 | `log_metrics` | `false` | Log per-partition metrics (rows, pages, RU, retries, duration) at WARNING, so they appear in executor logs |
+| `slow_request_ms`, `slow_request_log_per_minute` | off, `10` | Log a WARNING for every page fetch slower than this, with activity ids, partitions, request charge, service-side duration and throttling retries; at most `slow_request_log_per_minute` lines per Python worker per minute (the number left out is reported). Batch, snapshot and change-feed reads. |
+| `max_integrated_cache_staleness_ms` | | Maximum staleness of results served by the [integrated cache](https://learn.microsoft.com/azure/cosmos-db/integrated-cache) of a dedicated gateway (queries; needs a dedicated-gateway endpoint and Session or Eventual consistency) |
 | `infer_schema` | `false` | Infer the schema from a sample of documents instead of returning raw JSON; batch reads only. See [Schema inference](#schema-inference). |
 | `sampling_size`, `sampling_query` | `1000`, `query` | Documents sampled for `infer_schema`, and the query that samples them (with `query_parameters`) |
 | `infer_system_properties`, `infer_timestamp` | `false` | Include `_rid`, `_self`, `_etag`, `_attachments` and `_ts` (`infer_timestamp`: `_ts` only) in the inferred schema |
@@ -466,6 +477,14 @@ opts = {
     "tenant_id": "<tenant-id>",
     "client_id": "<client-id>",
     "client_secret": dbutils.secrets.get("<scope>", "<secret-name>"),
+}
+
+# Service principal with a certificate: the base64 of the PEM or PKCS#12 file
+opts = {
+    "auth_type": "service_principal",
+    "tenant_id": "<tenant-id>",
+    "client_id": "<client-id>",
+    "client_certificate": dbutils.secrets.get("<scope>", "<certificate-base64>"),
 }
 
 # Unity Catalog service credential
@@ -735,8 +754,10 @@ throughput for that.
   continuously running stream reads the whole container in every micro-batch.
 - Change-feed requests use Gateway mode (the Python SDK has no Direct mode).
 - Live partition splits and merges have not been tested against the service.
-- `service_principal` and `service_credential` are unit-tested only; `default` was tested with the
-  Azure CLI credential.
+- `service_principal` (secret or certificate) and `service_credential` are unit-tested only;
+  `default` was tested with the Azure CLI credential.
+- No global throughput control across reads or jobs, and no Spark UI custom metrics (the Python
+  Data Source API has no hook for them).
 - VARIANT and interval types are not produced directly; read STRING and use `parse_json()`.
 
 ## Databricks notes
