@@ -1,23 +1,49 @@
 [project]
 name = "cosmosdb-spark-datasource"
-version = "0.2.0rc1"
+version = "0.2.0"
 description = "PySpark Python data source for Azure Cosmos DB for NoSQL: parallel batch reads and change-feed streaming for Databricks serverless and Lakeflow Spark Declarative Pipelines."
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Mehdi Modarressi" }]
 requires-python = ">=3.10"
-keywords = ["spark", "pyspark", "databricks", "cosmosdb", "azure", "change-feed", "datasource"]
+keywords = [
+    "spark",
+    "pyspark",
+    "databricks",
+    "lakeflow",
+    "azure",
+    "cosmos-db",
+    "cosmosdb",
+    "change-feed",
+    "datasource",
+]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
-# pyspark is intentionally not a runtime dependency: Databricks provides it.
+# pyspark is not a runtime dependency: the Spark runtime provides it.
 dependencies = [
     # feed_range scoping for query_items arrived in 4.14; the change-feed continuation format used
     # by this package was verified against 4.17.1.
     "azure-cosmos>=4.14.0,<5",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Mmodarre/cosmosdb-spark-datasource"
+Documentation = "https://github.com/Mmodarre/cosmosdb-spark-datasource#readme"
+Issues = "https://github.com/Mmodarre/cosmosdb-spark-datasource/issues"
+Changelog = "https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 identity = [

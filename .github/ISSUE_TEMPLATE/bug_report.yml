@@ -1,0 +1,54 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove account names, endpoints, keys, tokens and document contents from everything you paste.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The read or stream (options without secrets, schema), and the container setup (partition key, number of physical partitions, change feed mode).
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error and logs
+      description: The full exception and any `cosmosdb_datasource` log lines.
+      render: text
+  - type: input
+    id: package-version
+    attributes:
+      label: cosmosdb-spark-datasource version
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Spark runtime
+      description: PySpark version, or the Databricks compute (serverless environment version, DBR version, Lakeflow Spark Declarative Pipelines).
+      placeholder: "PySpark 4.2.0 / Databricks serverless, environment version 4"
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Python, azure-cosmos and azure-identity versions
+      placeholder: "Python 3.12, azure-cosmos 4.17.1, azure-identity 1.26.0"
+  - type: dropdown
+    id: auth
+    attributes:
+      label: auth_type
+      options: [key, service_principal, access_token, service_credential, default]
