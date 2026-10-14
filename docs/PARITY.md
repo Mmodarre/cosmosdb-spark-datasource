@@ -53,7 +53,7 @@ source).
 | readMany / point reads | `spark.cosmos.read.readManyFiltering.enabled`, `_itemIdentity`, UDF `GetCosmosItemIdentityValue`; `readManyByPartitionKeys` | **Missing** | |
 | Runtime filtering | `spark.cosmos.read.runtimeFiltering.enabled` | **N/A** | No runtime-filter hook in the Python API. |
 | Integrated cache | `spark.cosmos.read.maxIntegratedCacheStalenessInMS` | **Missing** | |
-| Page size | `spark.cosmos.read.maxItemCount` (1000) | **Supported**: `page_size` (1000) | |
+| Page size | `spark.cosmos.read.maxItemCount` (1000) | **Supported**: `page_size` (5000) | Both libraries read fastest with 5,000-item pages in the benchmark. |
 | Consistency | `spark.cosmos.read.forceEventualConsistency` (default `true`), `.consistencyStrategy` | **Supported**: `consistency_level` (default: the account's) | Same RU per read at Session and Eventual. |
 | Preferred regions | `spark.cosmos.preferredRegionsList` | **Supported**: `preferred_regions` | |
 | Transport | Direct mode (TCP) by default, `spark.cosmos.useGatewayMode` | **Partially**: Gateway (HTTPS) only | The Python SDK has no Direct mode. |

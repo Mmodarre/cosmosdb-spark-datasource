@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import inspect
 import logging
 import sys
 from types import ModuleType
@@ -159,6 +160,22 @@ def filter_pushdown_planner() -> bool:
             return True
         frame = frame.f_back  # type: ignore[assignment]
     return False
+
+
+def engine_loaded() -> bool:
+    """Return True inside Databricks data source workers, where the engine's PySpark drives the reader."""
+    return ENGINE_PACKAGE in sys.modules
+
+
+def arrow_schema(schema: StructType) -> Any:
+    """Return the Arrow schema PySpark's read worker derives from ``schema`` (``records_to_arrow_batches``)."""
+    from pyspark.sql.pandas.types import to_arrow_schema
+
+    # 4.2 calls to_arrow_schema(return_type, timezone="UTC"); 4.0 and 4.1 have no timezone parameter
+    # and call to_arrow_schema(return_type), which gives timestamps in UTC as well.
+    if "timezone" in inspect.signature(to_arrow_schema).parameters:
+        return to_arrow_schema(schema, timezone="UTC")
+    return to_arrow_schema(schema)
 
 
 def local_struct_type(schema: Any) -> StructType:

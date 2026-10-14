@@ -90,8 +90,13 @@ class _ConversionFailure(Exception):
         self.reason = reason
 
 
+# One encoder for every call: json.dumps with non-default arguments builds a new JSONEncoder each time,
+# about 15% of the cost of encoding a 0.5 KB document. The output is identical.
+_ENCODER = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+
+
 def dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return _ENCODER.encode(value)
 
 
 _INT_RANGES = {
@@ -292,6 +297,10 @@ def _to_binary(value: Any) -> bytes:
 def _lookup(doc: Mapping[str, Any], name: str) -> Any:
     if name in doc:
         return doc[name]
+    return _lookup_case_insensitive(doc, name)
+
+
+def _lookup_case_insensitive(doc: Mapping[str, Any], name: str) -> Any:
     lowered = name.lower()
     for key, value in doc.items():
         if isinstance(key, str) and key.lower() == lowered:
@@ -312,7 +321,34 @@ def _null_checked(inner: Callable[[Any], Any], nullable: bool) -> Callable[[Any]
 
 def build_converter(dt: DataType, nullable: bool = True) -> Callable[[Any], Any]:
     """Return ``f(value) -> spark_value`` raising ``_ConversionFailure`` on unsafe input."""
-    return _null_checked(_build_non_null_converter(dt), nullable)
+    inner = _build_non_null_converter(dt)
+    native = _native_check(dt)
+    if native is None or not nullable:
+        return _null_checked(inner, nullable)
+
+    # A value of the column's own JSON type is returned as is, in one call: most values are.
+    def convert(value: Any) -> Any:
+        if native(value):
+            return value
+        if value is None:
+            return None
+        return inner(value)
+
+    return convert
+
+
+def _native_check(dt: DataType) -> Callable[[Any], bool] | None:
+    """Return a test for values the converter returns unchanged, or None."""
+    if isinstance(dt, StringType):
+        return lambda v: v.__class__ is str
+    if isinstance(dt, BooleanType):
+        return lambda v: v.__class__ is bool
+    if isinstance(dt, DoubleType):
+        return lambda v: v.__class__ is float
+    for cls, (lo, hi) in _INT_RANGES.items():
+        if isinstance(dt, cls):
+            return lambda v: v.__class__ is int and lo <= v <= hi  # bool is excluded by the class test
+    return None
 
 
 def _build_non_null_converter(dt: DataType) -> Callable[[Any], Any]:
@@ -360,9 +396,11 @@ def _build_non_null_converter(dt: DataType) -> Callable[[Any], Any]:
         fields = [(f.name, build_converter(f.dataType, f.nullable)) for f in dt.fields]
 
         def convert_struct(value: Any) -> tuple[Any, ...]:
-            if not isinstance(value, Mapping):
+            if value.__class__ is not dict and not isinstance(value, Mapping):
                 raise _ConversionFailure(f"cannot convert {_type_name(value)} to struct")
-            return tuple(conv(_lookup(value, name)) for name, conv in fields)
+            return tuple(
+                [conv(value[name] if name in value else _lookup_case_insensitive(value, name)) for name, conv in fields]
+            )
 
         return convert_struct
     raise CosmosConfigError(
@@ -422,6 +460,8 @@ _Getter = Callable[[RecordView], Any]
 def _doc_getter(name: str) -> _Getter:
     def get(view: RecordView) -> Any:
         doc = view.doc
+        if doc.__class__ is dict:  # skips the slow Mapping ABC check for what the SDK returns
+            return doc[name] if name in doc else _lookup_case_insensitive(doc, name)
         return _lookup(doc, name) if isinstance(doc, Mapping) else None
 
     return get
@@ -470,9 +510,16 @@ class RowBuilder:
                 conv = build_converter(f.dataType, f.nullable)
             self._fields.append((name, getter, conv))
         self._width = len(self._fields)
+        self._fast = [(spec[1], spec[2]) if spec is not None else (_no_value, _identity) for spec in self._fields]
 
     def build(self, view: RecordView) -> tuple[Any, ...] | None:
         """Return the row tuple, or None when the record must be dropped (DROPMALFORMED)."""
+        try:
+            return tuple([conv(get(view)) for get, conv in self._fast])
+        except _ConversionFailure:
+            return self._build_failed(view)
+
+    def _build_failed(self, view: RecordView) -> tuple[Any, ...] | None:
         out: list[Any] = [None] * self._width
         failed: list[tuple[str, str]] = []
         for index, spec in enumerate(self._fields):
@@ -495,6 +542,14 @@ class RowBuilder:
             if self.corrupt_index is not None:
                 out[self.corrupt_index] = dumps(view.doc) if view.doc is not None else None
         return tuple(out)
+
+
+def _no_value(view: RecordView) -> Any:
+    return None
+
+
+def _identity(value: Any) -> Any:
+    return value
 
 
 def _raw_doc(view: RecordView) -> Any:

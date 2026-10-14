@@ -200,7 +200,9 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 |---|---|---|
 | `query` | `SELECT * FROM c` | Query run **per input partition**, for server-side filters and projections. `ORDER BY`, `GROUP BY`, `DISTINCT`, `TOP`, `OFFSET` and aggregates apply per partition, not globally; do them in Spark. |
 | `query_parameters` | | JSON list of `{"name": "@p", "value": ...}` |
-| `page_size` | `1000` | Maximum items per request (the service also caps a page at about 4 MB) |
+| `page_size` | `5000` | Maximum items per request (the service also caps a page at about 4 MB). Pages of 5,000 cost about 7% fewer RU per document than pages of 1,000. |
+| `prefetch_pages` | `1` | Query pages fetched ahead, on one thread per task, while the current page is converted; `0` fetches on demand |
+| `arrow_batches` | `auto` | Hand rows to Spark as Arrow record batches, built per page (`auto`: not where the Databricks engine runs the reader, on serverless compute, where the batch layout is not verified) |
 | `partitions_per_feed_range` | `1` | Split every physical partition into N EPK sub-ranges, for N times more tasks. Each sub-range query scans its whole physical partition, so a full read costs about N times the RU of `1` (see [Sizing and performance](#sizing-and-performance)). `auto`: one task per physical partition. |
 | `mode` | `PERMISSIVE` | Conversion errors: `PERMISSIVE` (null, plus the corrupt-record column), `DROPMALFORMED` or `FAILFAST` |
 | `raw_json_column` | `body` | Name of the column holding the whole document |
@@ -267,7 +269,7 @@ critical = (
 | `initial_snapshot` | `false` | Read the whole container in the first micro-batch, then the change feed from the position the stream started at |
 | `initial_snapshot_delay_seconds` | `5` | No snapshot read starts earlier than this after the start position was resolved; protects against replica lag where session tokens do not apply (`ConsistentPrefix`, `Eventual`). `0` disables it. |
 | `partitions_per_feed_range` | `1` | EPK sub-splitting of change-feed reads (an integer; `auto` means 1). The initial snapshot is split like a batch read. |
-| `page_size` | `1000` | Maximum change-feed items per request |
+| `page_size` | `5000` | Maximum change-feed items per request |
 | `change_feed_end_wait_seconds` | `120` | How long a task waits for a lagging replica to reach the micro-batch's end LSN before it fails (Spark then retries the task) |
 | `mode`, `raw_json_column`, `corrupt_record_column`, `log_metrics` | as above | |
 
@@ -602,6 +604,13 @@ snapshots = spark.readStream.format("cosmosdb").options(**conn, container="custo
 - A projecting `query` (`SELECT c.id, c.status, c._ts FROM c`) cuts RU, bandwidth and JSON work
   when the whole document is not needed. A selective filter cuts them far more: push it with
   [filter pushdown](#filter-pushdown) or write it into `query`.
+- **Client-side speed**: with one task per physical partition, a task waits for the next page
+  and converts the current one. `prefetch_pages=1` overlaps the two, Arrow batches cut PySpark's
+  per-value conversion, and pages of 5,000 need a fifth of the round trips. Measured on DBR 17.3 (one
+  16-core node, 7 tasks, 1M documents of 0.55 KB, client-bound): a raw read went from 7.6 s to
+  5.3 s (131,000 to 190,000 rows/s), a 16-column typed read from 9.2 s to 5.9 s (109,000 to
+  170,000 rows/s). The read-ahead thread costs about 15% more CPU; set `prefetch_pages=0` where
+  executors' cores, not the service, are the limit.
 - Set `preferred_regions` to the region closest to the Spark cluster.
 - `log_metrics=true` logs one line per partition with rows, pages, RU, retries and duration
   (for queries also `replans`, splits handled during the read, and `duplicates`, re-created

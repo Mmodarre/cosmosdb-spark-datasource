@@ -10,6 +10,10 @@ First public release.
 
 ### Added
 
+- Faster batch reads: query pages are fetched one page ahead of the conversion (`prefetch_pages`,
+  default 1), rows reach Spark as Arrow record batches (`arrow_batches`, default `auto`), and row
+  conversion and the encoding of `body` take fewer calls. A client-bound read of 1M documents on
+  DBR 17.3 went from 131,000 to 190,000 rows/s (raw) and from 109,000 to 170,000 rows/s (typed).
 - Schema inference for batch reads (`infer_schema=true`): up to `sampling_size` (1000) documents of
   `sampling_query` (default: `query`), spread over the physical partitions, give typed columns.
   Types merge to the tightest common type (else STRING); `infer_system_properties` and
@@ -33,6 +37,11 @@ First public release.
 - `snapshot_stream`: a stream in which every micro-batch is one complete snapshot of the container,
   stamped with `snapshot_ts` in whole milliseconds, with `snapshot_interval_seconds` to space the
   snapshots. One snapshot per `Trigger.AvailableNow` run.
+
+### Changed
+
+- The default `page_size` is 5000 (was 1000): fewer round trips and about 7% fewer RU per document
+  for a full read.
 
 ### Fixed
 

@@ -118,11 +118,11 @@ def get_backend(opts: CosmosOptions, token: SecretToken | None = None) -> Any:
             _CLIENTS[key] = entry
         elif entry.credential is not None:
             entry.credential.update(token)
-        backend_key = (*key, opts.database, opts.container, opts.priority)
+        backend_key = (*key, opts.database, opts.container, opts.priority, opts.prefetch_pages)
         backend = _BACKENDS.get(backend_key)
         if backend is None:
             container = entry.client.get_database_client(opts.database).get_container_client(opts.container)
-            backend = SdkBackend(container, priority=opts.priority)
+            backend = SdkBackend(container, priority=opts.priority, prefetch_pages=opts.prefetch_pages)
             _BACKENDS[backend_key] = backend
     return backend
 

@@ -17,9 +17,10 @@ import json
 import pickle
 from typing import Any
 
+import pyarrow as pa
 from pyspark import cloudpickle
 from pyspark.sql.datasource import CaseInsensitiveDict
-from pyspark.sql.types import StructType
+from pyspark.sql.types import ArrayType, MapType, StructType
 from pyspark.sql.worker.plan_data_source_read import records_to_arrow_batches
 
 from cosmosdb_datasource import CosmosDBDataSource
@@ -33,9 +34,35 @@ def make_source(options: dict[str, str]) -> CosmosDBDataSource:
     return _ship(CosmosDBDataSource(CaseInsensitiveDict(options)))
 
 
-def validate_rows(rows: list[tuple], schema: StructType, ds: CosmosDBDataSource) -> None:
+def validate_rows(rows: list[Any], schema: StructType, ds: CosmosDBDataSource) -> None:
     if rows:
         list(records_to_arrow_batches(iter(rows), 1000, schema, ds))
+
+
+def _from_arrow(value: Any, dtype: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(dtype, StructType):
+        return tuple(_from_arrow(value[f.name], f.dataType) for f in dtype.fields)
+    if isinstance(dtype, ArrayType):
+        return [_from_arrow(v, dtype.elementType) for v in value]
+    if isinstance(dtype, MapType):
+        return {_from_arrow(k, dtype.keyType): _from_arrow(v, dtype.valueType) for k, v in value}
+    return value
+
+
+def as_rows(output: list[Any], schema: StructType) -> list[tuple]:
+    """Return what ``read()`` produced as row tuples, also when it yielded ``pyarrow.RecordBatch``es."""
+    rows: list[tuple] = []
+    for item in output:
+        if isinstance(item, pa.RecordBatch):
+            columns = [
+                [_from_arrow(v, f.dataType) for v in item.column(i).to_pylist()] for i, f in enumerate(schema.fields)
+            ]
+            rows.extend(zip(*columns, strict=True))
+        else:
+            rows.append(item)
+    return rows
 
 
 def run_batch(options: dict[str, str], schema: StructType | None = None) -> tuple[list[tuple], list[Any]]:
@@ -66,7 +93,7 @@ def run_batch_with_filters(
         executor_reader = cloudpickle.loads(shipped)
         out = list(executor_reader.read(pickle.loads(pickle.dumps(part))))
         validate_rows(out, schema, ds)
-        rows.extend(out)
+        rows.extend(as_rows(out, schema))
     return rows, parts, remaining
 
 

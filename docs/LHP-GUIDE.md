@@ -368,7 +368,7 @@ To compare a target table with its container, use the reconcile job of the
 |---|---|---|
 | `partitions_per_feed_range` | substitution, used in every load | EPK sub-splits per physical partition. Each sub-range costs about the RU of a scan of the whole partition; keep `1` (or `auto`, which is 1) unless one task per partition is too slow. |
 | `max_items_per_trigger` | a change-feed load's options | LSN budget per micro-batch, not a row cap (bulk writes put many documents under one LSN). It does not apply to an initial snapshot. Serverless SDP runs several capped micro-batches per triggered update. |
-| `page_size` | options | items per request (default 1000) |
+| `page_size` | options | items per request (default 5000) |
 | `priority: Low` | preset or options | with priority-based execution enabled on the account, OLTP requests win under throttling |
 | `throttle_max_retries`, `throttle_max_wait_seconds` | options | SDK handling of HTTP 429 (defaults 9 and 60 s) |
 

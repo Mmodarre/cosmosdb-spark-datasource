@@ -17,13 +17,14 @@ from typing import Any, cast
 from pyspark.sql.datasource import DataSourceReader, InputPartition
 from pyspark.sql.types import StructType
 
-from cosmosdb_datasource import epk, retry
+from cosmosdb_datasource import _compat, epk, retry
 from cosmosdb_datasource._base import CosmosReaderBase
+from cosmosdb_datasource.arrow import record_batches
 from cosmosdb_datasource.auth import SecretToken
 from cosmosdb_datasource.dedup import SeenKeys, fingerprint
 from cosmosdb_datasource.documents import PartitionKeyInfo
 from cosmosdb_datasource.errors import CosmosDataSourceError
-from cosmosdb_datasource.options import CosmosOptions
+from cosmosdb_datasource.options import AUTO, CosmosOptions
 from cosmosdb_datasource.schema import RecordView
 
 logger = logging.getLogger("cosmosdb_datasource")
@@ -230,7 +231,19 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
     def _query(self) -> tuple[str, list[dict[str, Any]] | None]:
         return self._opts.query, self._opts.parameters_for_sdk()
 
-    def read(self, partition: InputPartition | None) -> Iterator[tuple[Any, ...]]:
+    def read(self, partition: InputPartition | None) -> Iterator[Any]:
+        rows = self._read_rows(partition)
+        if self._schema.fields and self._arrow_batches():
+            return record_batches(rows, self._schema, self._opts.page_size)
+        return rows
+
+    def _arrow_batches(self) -> bool:
+        # Off by default where the Databricks engine runs the reader: its read worker's Arrow schema for
+        # the output schema has not been verified against the one built here.
+        setting = self._opts.arrow_batches
+        return setting == "true" or (setting == AUTO and not _compat.engine_loaded())
+
+    def _read_rows(self, partition: InputPartition | None) -> Iterator[tuple[Any, ...]]:
         if partition is None:  # Spark substitutes [None] for an empty partition list
             return
         partition = cast(CosmosQueryPartition, partition)
