@@ -25,6 +25,8 @@ optionally `azure-identity`), which serverless environments and pipelines can in
   later micro-batches read the change feed from the position the stream started at. One stream
   yields the current state plus every later change, including deletes with
   `AllVersionsAndDeletes`.
+- **Snapshot stream** (`snapshot_stream=true`): every micro-batch is one complete snapshot of the
+  container, stamped with `snapshot_ts`, so an append flow keeps a history of container states.
 - **Authentication**: account key, Entra ID service principal, pre-minted access token, Unity
   Catalog service credential, or `DefaultAzureCredential`. Tokens are minted on the driver and
   shipped to the tasks.
@@ -42,8 +44,8 @@ optionally `azure-identity`), which serverless environments and pipelines can in
 | Python | 3.10 to 3.13 | CI |
 | `azure-cosmos` | `>=4.14.0,<5` | CI: unit tests with 4.14.0 and with the latest 4.x; integration tests with 4.17.1 |
 | `azure-identity` (optional) | `>=1.19,<2` | unit tests only |
-| Databricks serverless jobs | environment version 4 | manually, with 0.2.0 (not in CI) |
-| Lakeflow SDP, serverless | DBR 18.3 | manually, with 0.2.0 (not in CI) |
+| Databricks serverless jobs | environment version 4 | manually, with 0.2.0 and 0.3.1 (not in CI) |
+| Lakeflow SDP, serverless | DBR 18.3 | manually, with 0.2.0 and 0.3.1 (not in CI) |
 | Databricks classic compute | runtimes with Spark 4.0 or later | not tested |
 | Spark 3.x | | not supported: the Python Data Source API starts with Spark 4.0 |
 
@@ -64,7 +66,7 @@ PySpark is not a dependency: the Spark runtime provides it.
 - **Databricks serverless notebooks and jobs**: add the package to the notebook or job
   environment, or run `%pip install cosmosdb-spark-datasource`.
 - **Lakeflow Spark Declarative Pipelines**: add it to the pipeline's `environment.dependencies`.
-  Write version ranges with `~=` (e.g. `cosmosdb-spark-datasource~=0.2.0`): on DBR 18.3 the
+  Write version ranges with `~=` (e.g. `cosmosdb-spark-datasource~=0.3.1`): on DBR 18.3 the
   dependency string `azure-identity>=1.19,<2` failed to install (`ENVIRONMENT_PIP_INSTALL_ERROR`)
   while `azure-identity~=1.19` installed.
 
@@ -219,7 +221,19 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `change_feed_end_wait_seconds` | `120` | How long a task waits for a lagging replica to reach the micro-batch's end LSN before it fails (Spark then retries the task) |
 | `mode`, `raw_json_column`, `corrupt_record_column`, `log_metrics` | as above | |
 
-`query` is rejected for streams; filter the stream in Spark.
+`query` is rejected for change-feed streams; filter the stream in Spark.
+
+### Snapshot streams
+
+| Option | Default | Description |
+|---|---|---|
+| `snapshot_stream` | `false` | `true`: every micro-batch of the `readStream` is one complete snapshot of the container (see [Snapshot stream](#snapshot-stream)). Selects the snapshot-stream schema. |
+| `snapshot_interval_seconds` | `0` | Minimum time between the `snapshot_ts` of two snapshots. `0`: a new snapshot whenever Spark asks for new data (one per trigger). Only with `snapshot_stream=true`. |
+
+`query`, `query_parameters`, `partitions_per_feed_range` (`auto` included), `page_size` and the
+connection, retry and conversion options apply as for batch reads. `change_feed_mode`,
+`start_from`, `initial_snapshot`, `initial_snapshot_delay_seconds`, `max_items_per_trigger` and
+`change_feed_end_wait_seconds` are rejected with `snapshot_stream=true`.
 
 ## Schemas and type conversion
 
@@ -235,7 +249,7 @@ Batch reads:
 | `_etag` | STRING | Document etag |
 | `body` | STRING | The whole document as compact JSON, system properties included |
 
-Streams:
+Change-feed streams:
 
 | Column | Type | Content |
 |---|---|---|
@@ -249,11 +263,16 @@ Streams:
 | `body` | STRING | Document JSON (null for deletes) |
 | `feed_range` | STRING | EPK range of the change (`"<min>-<max>"`); for snapshot rows, the feed range the snapshot partition was planned from |
 
+Snapshot streams: the batch schema plus `snapshot_ts` (TIMESTAMP), the same value on every row of
+one snapshot. With a user schema, `snapshot_ts` is a virtual column like `pk` (TIMESTAMP,
+TIMESTAMP_NTZ or STRING).
+
 Spark does not tell a data source whether `read` or `readStream` asks for its default schema, so
-the change-feed schema is used whenever a change-feed option (`change_feed_mode`, `start_from`,
-`max_items_per_trigger`, `initial_snapshot`, `initial_snapshot_delay_seconds`) is set. A
-`readStream` without those options and without an explicit schema fails with an explanatory error,
-and so does a batch `read` with them.
+`snapshot_stream=true` selects the snapshot-stream schema, and the change-feed schema is used
+whenever a change-feed option (`change_feed_mode`, `start_from`, `max_items_per_trigger`,
+`initial_snapshot`, `initial_snapshot_delay_seconds`) is set. A `readStream` without those options
+and without an explicit schema fails with an explanatory error, and so does a batch `read` with
+them.
 
 ### User-specified schemas
 
@@ -261,8 +280,8 @@ With `.schema(...)` each column is resolved as follows:
 
 - **Virtual columns**: `pk`, `feed_range`, `body` (or the `raw_json_column` name) and the
   corrupt-record column. `body` declared as STRING holds the JSON text; declared as a STRUCT or
-  MAP it holds the parsed document. Streams also have `id`, `_ts`, `operation`, `lsn`, `crts` and
-  `ttl_expired`.
+  MAP it holds the parsed document. Change-feed streams also have `id`, `_ts`, `operation`, `lsn`,
+  `crts` and `ttl_expired`; snapshot streams have `snapshot_ts`.
 - **Every other column** is a top-level document property, matched by exact name, then
   case-insensitively. STRUCT, ARRAY and MAP types are converted recursively.
 - **Missing properties** are null.
@@ -389,7 +408,9 @@ Entra ID works.
   `spark.sql.streaming.triggerAvailableNowWrapper.enabled=true` on these versions.
 - **PySpark 4.2, Databricks serverless and SDP** use admission control (`ReadMaxRows`) and native
   `Trigger.AvailableNow`: one run makes several capped micro-batches up to the position captured at
-  its start, then stops (observed on Databricks serverless jobs and SDP, DBR 18.3).
+  its start, then stops (observed on Databricks serverless jobs and SDP, DBR 18.3). With
+  `initial_snapshot`, that position is moved once, right after the snapshot (see
+  [Initial snapshot](#initial-snapshot)).
 
 ### Keys and ordering for CDC
 
@@ -405,6 +426,11 @@ Entra ID works.
   `crts` null, `ttl_expired = false`), split like a batch read. Its change-feed end equals its
   start, so change rows start with the second micro-batch; `max_items_per_trigger` does not limit
   the snapshot.
+- With `Trigger.AvailableNow` on PySpark 4.2, Databricks serverless and SDP, Spark captures the
+  run's end position before the start position is resolved. The reader moves it once, right after
+  the snapshot, to the current position of every range, so the first run also reads the changes
+  made while the snapshot was read, and one triggered update leaves the merged result complete. On
+  PySpark 4.0 and 4.1 a run is a single micro-batch, so the first run ends after the snapshot.
 - The snapshot is read only after the start position was resolved and written to Spark's offset
   log. A retry or restart before the first micro-batch is committed reads the snapshot again from
   the same start position; after it is committed, no snapshot is read again. A new checkpoint (or
@@ -418,6 +444,46 @@ Entra ID works.
   the snapshot read it, as deletes are not in that feed.
 
 The correctness argument is in [docs/DESIGN.md](docs/DESIGN.md#initial-snapshot).
+
+## Snapshot stream
+
+Every micro-batch of a `snapshot_stream=true` stream is one complete snapshot of the container:
+the rows of a batch read plus `snapshot_ts`. An append flow into a bronze table then keeps a
+history of container states, which a separate `create_auto_cdc_from_snapshot_flow` can turn into
+SCD2 ([docs/MODES.md](docs/MODES.md#6-snapshot-stream), mode 6).
+
+```python
+snapshots = spark.readStream.format("cosmosdb").options(**conn, container="customers", snapshot_stream="true").load()
+(
+    snapshots.writeStream.option("checkpointLocation", "/Volumes/<catalog>/<schema>/<volume>/customers_snapshots")
+    .trigger(availableNow=True)  # one new snapshot per run
+    .toTable("<catalog>.<schema>.customers_snapshots")
+)
+```
+
+- **One snapshot per run.** With `Trigger.AvailableNow`, and in every triggered SDP update, a run
+  plans exactly one new snapshot; a run that first replays an uncommitted batch of a failed run
+  commits that one as well. Other triggers plan a new snapshot whenever `snapshot_interval_seconds`
+  has passed since the previous one. Set it for a continuously running stream, otherwise every
+  micro-batch reads the whole container (a WARNING is logged when two snapshots are planned less
+  than 60 s apart).
+- **`snapshot_ts`** is chosen when the batch is planned (`max(now, previous + 1 ms)`, UTC, whole
+  milliseconds), stored in the batch's end offset and copied to every row. A retried task or a
+  replay keeps the value; the replayed rows are re-read and reflect the container at replay time.
+  Milliseconds, because SDP hands a timestamp snapshot version back to a snapshot-CDC source
+  function truncated to milliseconds (observed on DBR 18.3).
+- **Atomicity.** One micro-batch is one Delta commit, so a reader sees all rows of a snapshot or
+  none.
+- **Offsets**: `{"v": 1, "kind": "snapshot", "seq": n, "snapshot_ts": "...", "rid": "..."}`. A
+  change-feed checkpoint is rejected by a snapshot stream and vice versa. A re-created container
+  (different `_rid`) fails with an explanatory error; reset the stream's checkpoint to continue
+  (the target table's history can be kept).
+- **Planning** is the batch reader's. Each query carries the session token of a `Now` probe of its
+  feed range taken when the batch is planned (about 1 RU per feed range), so with Session
+  consistency a snapshot sees every write acknowledged before it was planned.
+- **Limits.** Not a point-in-time read, like batch reads. A snapshot of an empty container has no
+  rows, so it is invisible downstream. Read limits (`ReadMaxRows`) are ignored: a snapshot is never
+  split across micro-batches. Every snapshot costs a full read and a full copy in the target table.
 
 ## Sizing and performance
 
@@ -448,6 +514,8 @@ The correctness argument is in [docs/DESIGN.md](docs/DESIGN.md#initial-snapshot)
 - `LatestVersion` does not emit deletes. `AllVersionsAndDeletes` starts only at `Now`, and its
   history is bounded by the continuous-backup retention: a stream stopped longer than that needs a
   new checkpoint.
+- `snapshot_stream`: every snapshot is a full read; with `snapshot_interval_seconds=0` a
+  continuously running stream reads the whole container in every micro-batch.
 - Change-feed requests use Gateway mode (the Python SDK has no Direct mode).
 - Live partition splits and merges have not been tested against the service.
 - `service_principal` and `service_credential` are unit-tested only; `default` was tested with the
@@ -478,6 +546,9 @@ The correctness argument is in [docs/DESIGN.md](docs/DESIGN.md#initial-snapshot)
 | `... only apply to spark.readStream` | Remove `change_feed_mode`, `start_from`, `max_items_per_trigger` and the snapshot options from the batch read |
 | `The checkpointed offset belongs to a different container instance` | The container was re-created; use a new checkpoint |
 | `checkpoint was created with change_feed_mode=...` | The mode changed; use a new checkpoint |
+| `Option(s) ... cannot be combined with snapshot_stream=true` | Remove the change-feed options from the snapshot stream |
+| `The checkpoint was written by a change-feed stream, but this stream uses snapshot_stream=true` (or the reverse) | The read mode changed on an existing checkpoint; use a new checkpoint |
+| `The checkpointed snapshot stream belongs to a different container instance` | The container was re-created; reset the stream's checkpoint |
 | `did not reach LSN ... within 120s` | A replica lagged for a long time; Spark retries the task. Increase `change_feed_end_wait_seconds` or use stronger consistency. |
 | HTTP 404 with sub-status 1002, retried while reading the initial snapshot | No replica had caught up with the recorded session token yet; it is retried with backoff (`max_retries`). Persistent failures mean the replicas lag longer than the retry budget. |
 | `initial_snapshot=true, but the first micro-batch of this checkpoint was planned without a snapshot` | The checkpoint's first batch was planned without the option; use a new checkpoint location to read a snapshot |
@@ -488,7 +559,7 @@ The correctness argument is in [docs/DESIGN.md](docs/DESIGN.md#initial-snapshot)
 
 ## Documentation
 
-- [docs/MODES.md](docs/MODES.md): every read mode with examples, guarantees and the matching
+- [docs/MODES.md](docs/MODES.md): every read mode, including the snapshot stream, with examples, guarantees and the matching
   target-table pattern; choosing between a snapshot and the change feed; ordering, full-refresh
   rules and costs.
 - [docs/LHP-GUIDE.md](docs/LHP-GUIDE.md): using the data source with Lakehouse Plumber.

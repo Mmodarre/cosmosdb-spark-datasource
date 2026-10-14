@@ -23,6 +23,12 @@ PySpark compatibility:
   ``reportLatestOffset`` and ``prepareForTriggerAvailableNow`` are used there as well.
 * Databricks serverless runs the 4.2+ protocol from its engine PySpark (``_engine_pyspark``) while
   ``pyspark`` in the worker is the client 4.0 package; see :mod:`cosmosdb_datasource._compat`.
+
+Trigger.AvailableNow with an initial snapshot (4.2+): Spark captures the target before ``initialOffset()``
+resolves P0, so the target is behind P0. Once batch 0 has run, the next ``latestOffset`` (whose start is
+batch 0's end offset) moves the target once to the positions it has just probed. The same run then reads
+the changes made while the snapshot was read, and stops at that position. On 4.0/4.1 Spark runs a single
+batch per AvailableNow run, so the first run still ends after the snapshot.
 """
 
 from __future__ import annotations
@@ -161,6 +167,7 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         self._known: Offset | None = None
         self._initial: Offset | None = None
         self._target: Offset | None = None
+        self._target_refreshed = False  # AvailableNow target moved past the initial snapshot (once per run)
         self._reported: Offset | None = None
         self._resolved_at: float | None = None  # monotonic time this process resolved the initial offset
 
@@ -276,6 +283,16 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
             return Offset(rid, mode, base.ranges, init=base.ranges, snapshot=base.snapshot).to_dict()
         starts = [r.lsn for r in refined.ranges]
         ends = allocate_budget(starts, currents, self._cap(limit))
+        if self._target is not None and not self._target_refreshed and base.snapshot is not None:
+            # The start is the end offset of batch 0 (the initial snapshot), which has just run. Spark
+            # captured the AvailableNow target before P0 was resolved, so the run would stop here and
+            # the changes made while the snapshot was read would wait for the next run. Move the target
+            # once to the positions probed now: this run drains them, and it still terminates.
+            self._target = self._reported
+            self._target_refreshed = True
+            logger.info(
+                "cosmosdb: Trigger.AvailableNow target moved to the current position after the initial snapshot"
+            )
         if self._target is not None:
             ends = [
                 max(r.lsn, min(e, min_overlapping_lsn(self._target, r.lo, r.hi)))
@@ -304,6 +321,7 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
     def prepareForTriggerAvailableNow(self) -> None:  # PySpark >= 4.2 only
         backend, _token, rid, _pk = self._context()
         self._target = self._current_offset(backend, rid)
+        self._target_refreshed = False
         logger.info("cosmosdb Trigger.AvailableNow target captured for %d range(s)", len(self._target.ranges))
 
     def partitions(self, start: dict, end: dict) -> list[CosmosChangeFeedPartition | CosmosSnapshotPartition]:

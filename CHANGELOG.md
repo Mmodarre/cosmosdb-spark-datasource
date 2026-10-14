@@ -22,5 +22,14 @@ First public release.
   a Unity Catalog service credential, or `DefaultAzureCredential`.
 - User-specified schemas with safe type conversion and `PERMISSIVE`, `DROPMALFORMED` and
   `FAILFAST` modes.
+- `snapshot_stream`: a stream in which every micro-batch is one complete snapshot of the container,
+  stamped with `snapshot_ts` in whole milliseconds, with `snapshot_interval_seconds` to space the
+  snapshots. One snapshot per `Trigger.AvailableNow` run.
+
+### Fixed
+
+- With `initial_snapshot` and `Trigger.AvailableNow` (PySpark 4.2, Databricks), the first run ended
+  after the snapshot, so the changes made while it was read waited for the next run. The run's
+  target is now moved once after the snapshot, and the first run drains them.
 
 [Unreleased]: https://github.com/Mmodarre/cosmosdb-spark-datasource/commits/main

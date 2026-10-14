@@ -6,16 +6,20 @@ Declarative Pipelines (SDP) from YAML flowgroups. This guide builds the example 
 through LHP's `custom_datasource` load.
 
 **Status.** The example validates and generates with LHP 0.9.2 (`lhp validate --strict`,
-`lhp generate`). The generated pipelines have not been run on Databricks; the same three patterns,
-written by hand, are in [`examples/databricks-bundle/`](../examples/databricks-bundle/). Statements
-about runtime behaviour that rest on the data source's own tests or on the hand-written pipelines
-say so; anything else is marked *not verified*.
+`lhp generate`). The change-feed and batch pipelines have not been run on Databricks as generated
+here; the same three patterns, written by hand, are in
+[`examples/databricks-bundle/`](../examples/databricks-bundle/). The two snapshot-history pipelines
+ran on Databricks serverless SDP in an earlier form of this project. Statements about runtime
+behaviour that rest on the data source's own tests or on the hand-written pipelines say so; anything
+else is marked *not verified*.
 
 | Pipeline | Pattern | Read mode ([MODES.md](MODES.md)) |
 |---|---|---|
 | `lhp_orders_avad` | AVAD change feed with an initial snapshot to bronze, then SCD1 with deletes | 4 |
 | `lhp_orders_latest` | LatestVersion change feed from `Beginning` to bronze, then SCD1 | 2 |
 | `lhp_customers_scd2` | batch snapshot view to SCD2, in one pipeline | 1 |
+| `lhp_customers_snapshots_bronze` | snapshot stream: one complete snapshot per update into a bronze history | 6 |
+| `lhp_customers_scd2_history` | SCD2 from the bronze history with a snapshot source function, a separate pipeline | 6 |
 
 ## 1. Prerequisites
 
@@ -35,7 +39,7 @@ LHP sends telemetry by default; set `DO_NOT_TRACK=1` or run `lhp telemetry off` 
 The reader classes run in Python worker processes, which import them (and `azure-cosmos`) from
 installed packages. LHP's `custom_datasource` copies only one entry file into the pipeline, so the
 implementation must come from the pipeline environment: `config/pipeline_config.yaml` adds
-`${datasource_package}` (default `cosmosdb-spark-datasource~=0.2.0`; a wheel path in a Unity
+`${datasource_package}` (default `cosmosdb-spark-datasource~=0.3.1`; a wheel path in a Unity
 Catalog volume works too) and `azure-identity~=1.19` to `environment.dependencies`.
 
 Write version ranges with `~=`: on DBR 18.3, SDP failed to install `azure-identity>=1.19,<2` while
@@ -54,6 +58,7 @@ ships the generated pipeline code. The example keeps the default, `source`.
 | `config/pipeline_config.yaml` | serverless, CURRENT channel, triggered; `environment.dependencies`; default catalog and schema per pipeline |
 | `presets/cosmos_connection.yaml` | entry module, endpoint, database and credentials of every cosmosdb load |
 | `py_functions/cosmos_source.py` | the entry module (section 4) |
+| `py_functions/next_snapshot.py` | the snapshot source function of `lhp_customers_scd2_history` |
 | `pipelines/<pipeline>/<flowgroup>.yaml` | one flowgroup per pipeline (section 5) |
 | `databricks.yml` | bundle with `sync.include: generated/${bundle.target}/**` and the `dev` target |
 
@@ -72,11 +77,12 @@ dev:
   bronze_schema: cosmosdb_lhp_bronze
   silver_schema: cosmosdb_lhp_silver
   ops_schema: cosmosdb_lhp_ops
-  datasource_package: cosmosdb-spark-datasource~=0.2.0
+  datasource_package: cosmosdb-spark-datasource~=0.3.1
   cosmos_database: <database>
   customers_container: customers
   orders_container: orders
   partitions_per_feed_range: "1"
+  min_snapshot_ratio: "0.5"
 
 secrets:
   default_scope: <scope>
@@ -256,6 +262,39 @@ update creates a new version of every row. A read that returns too few documents
 missing row; pure LHP has no hook for a pre-update guard, so check the source with a job task if
 that is a risk.
 
+### `lhp_customers_snapshots_bronze` and `lhp_customers_scd2_history`: snapshot history to SCD2
+
+The bronze pipeline loads with `readMode: stream` and `snapshot_stream: "true"`, and appends to a
+streaming table clustered by `snapshot_ts` with `pipelines.reset.allowed: "false"`: each update
+appends one complete snapshot, and the history exists nowhere else.
+
+The history pipeline writes with `mode: snapshot_cdc` and a `source_function`
+(`py_functions/next_snapshot.py`) that returns the oldest bronze snapshot newer than the version
+SDP processed last:
+
+```yaml
+      snapshot_cdc_config:
+        source_function:
+          file: py_functions/next_snapshot.py
+          function: next_snapshot
+          parameters:
+            bronze_table: "${catalog}.${bronze_schema}.customers_snapshots"
+            columns: ["pk", "id", "_ts", "_etag", "body"]
+            min_snapshot_ratio: "${min_snapshot_ratio}"
+        keys: ["pk", "id"]
+        stored_as_scd_type: 2
+```
+
+- It is a separate pipeline because SDP calls the function at run time and cannot order it after
+  the bronze flow; run the bronze pipeline first, for example as two tasks of one job.
+  `depends_on` on the write action declares the edge for `lhp dag` only.
+- The first update fails unless bronze already holds a snapshot.
+- `columns` must not contain `snapshot_ts`, which changes on every snapshot.
+- `min_snapshot_ratio` (substitution) fails the update when a snapshot is much smaller than the
+  previous one, which would otherwise close every missing row; `"0"` disables it.
+- The pipeline reads only Delta, so its `environment.dependencies` is empty in
+  `config/pipeline_config.yaml`.
+
 ## 6. Secrets
 
 - `${secret:<alias>/<key>}` in an option becomes `dbutils.secrets.get(scope="<scope>", key="<key>")`
@@ -295,9 +334,11 @@ targets.
 
 | Pipeline | First update | Later updates |
 |---|---|---|
-| `lhp_orders_avad` | the snapshot only: AvailableNow captures its target before the start position is resolved, so changes made during the first update arrive with the second | AVAD changes since the checkpoint |
+| `lhp_orders_avad` | the snapshot, then the changes made while it was read: the AvailableNow target is moved once after the snapshot | AVAD changes since the checkpoint |
 | `lhp_orders_latest` | every live document, through the change feed | changes since the checkpoint |
 | `lhp_customers_scd2` | the initial SCD2 table (all rows current) | the diff with the previous update's snapshot |
+| `lhp_customers_snapshots_bronze` | one snapshot | one more snapshot |
+| `lhp_customers_scd2_history` | the initial SCD2 table from the first snapshot in bronze (fails if there is none) | one version change per new snapshot in bronze |
 
 These follow from the data source's AvailableNow behaviour and the hand-written pipelines; they
 are *not verified* for the generated pipelines.
@@ -310,6 +351,9 @@ Full refresh:
   the hand-written pipeline). For `lhp_orders_avad`, never reset only the stream checkpoint either.
 - Refreshing only a silver table is safe: it is rebuilt from the append-only bronze table.
 - `lhp_customers_scd2`: a full refresh restarts the SCD2 history from the current state.
+- `lhp_customers_snapshots_bronze` and `lhp_customers_scd2_history`: resets are disabled
+  (`pipelines.reset.allowed: "false"`). Resetting only the bronze flow's checkpoint is safe: a new
+  checkpoint appends a new snapshot with a later `snapshot_ts`.
 
 AVAD changes can only be read within the account's continuous-backup retention (7 or 30 days).
 Schedule `lhp_orders_avad` well within it and alert on failures; a stale stream needs a full

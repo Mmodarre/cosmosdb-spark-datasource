@@ -9,7 +9,7 @@ dev:
   silver_schema: cosmosdb_lhp_silver
   ops_schema: cosmosdb_lhp_ops
   # A version from PyPI, or the path of a wheel in a Unity Catalog volume.
-  datasource_package: cosmosdb-spark-datasource~=0.2.0
+  datasource_package: cosmosdb-spark-datasource~=0.3.1
 
   cosmos_database: <database>
   customers_container: customers
@@ -17,6 +17,9 @@ dev:
   # EPK sub-splits per physical partition: "auto" sizes batch reads (about 1 GiB per task) and
   # means 1 for change-feed reads.
   partitions_per_feed_range: "1"
+  # lhp_customers_scd2_history fails when a new snapshot holds fewer rows than this times the
+  # previous one ("0" disables the check): a short snapshot would close every missing row.
+  min_snapshot_ratio: "0.5"
 
 secrets:
   # Alias -> secret scope. The preset uses ${secret:cosmos/endpoint} and ${secret:cosmos/account-key}.

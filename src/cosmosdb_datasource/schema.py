@@ -46,6 +46,7 @@ from cosmosdb_datasource.options import PARSE_DROPMALFORMED, PARSE_FAILFAST
 
 PK_COLUMN = "pk"
 FEED_RANGE_COLUMN = "feed_range"
+SNAPSHOT_TS_COLUMN = "snapshot_ts"
 STREAM_METADATA_COLUMNS = ("id", "_ts", "operation", "lsn", "crts", "ttl_expired")
 
 
@@ -59,6 +60,11 @@ def batch_schema(raw_column: str = "body") -> StructType:
             StructField(raw_column, StringType(), True),
         ]
     )
+
+
+def snapshot_stream_schema(raw_column: str = "body") -> StructType:
+    """Batch schema plus ``snapshot_ts`` (the same value on every row of one snapshot)."""
+    return StructType([*batch_schema(raw_column).fields, StructField(SNAPSHOT_TS_COLUMN, TimestampType(), True)])
 
 
 def change_feed_schema(raw_column: str = "body") -> StructType:
@@ -367,7 +373,7 @@ def _build_non_null_converter(dt: DataType) -> Callable[[Any], Any]:
 class RecordView:
     """Values available to the row builder for one document / change event."""
 
-    __slots__ = ("crts", "doc", "feed_range", "id", "lsn", "operation", "pk", "ts", "ttl_expired")
+    __slots__ = ("crts", "doc", "feed_range", "id", "lsn", "operation", "pk", "snapshot_ts", "ts", "ttl_expired")
 
     def __init__(
         self,
@@ -381,6 +387,7 @@ class RecordView:
         crts: int | None = None,
         ttl_expired: bool | None = None,
         feed_range: str | None = None,
+        snapshot_ts: str | None = None,
     ) -> None:
         self.doc = doc
         self.id = id
@@ -391,6 +398,7 @@ class RecordView:
         self.crts = crts
         self.ttl_expired = ttl_expired
         self.feed_range = feed_range
+        self.snapshot_ts = snapshot_ts
 
 
 _Getter = Callable[[RecordView], Any]
@@ -415,6 +423,7 @@ class RowBuilder:
         raw_column: str,
         corrupt_column: str,
         parse_mode: str,
+        snapshot: bool = False,
     ) -> None:
         self.parse_mode = parse_mode
         self.corrupt_index: int | None = None
@@ -434,6 +443,8 @@ class RowBuilder:
                 getter = _pk
             elif name == FEED_RANGE_COLUMN:
                 getter = _feed_range
+            elif snapshot and name == SNAPSHOT_TS_COLUMN:
+                getter = _snapshot_ts  # ISO-8601 UTC text: converted exactly to TIMESTAMP / TIMESTAMP_NTZ / STRING
             elif stream and name in STREAM_METADATA_COLUMNS:
                 getter = _STREAM_GETTERS[name]
             else:
@@ -481,6 +492,10 @@ def _pk(view: RecordView) -> Any:
 
 def _feed_range(view: RecordView) -> Any:
     return view.feed_range
+
+
+def _snapshot_ts(view: RecordView) -> Any:
+    return view.snapshot_ts
 
 
 _STREAM_GETTERS: dict[str, _Getter] = {
