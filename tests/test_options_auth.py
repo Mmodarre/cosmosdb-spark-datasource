@@ -309,3 +309,26 @@ def test_access_tokens_of_different_principals_never_share_a_client() -> None:
     sp1 = opts(auth_type="service_principal", tenant_id="t", client_id="c", client_secret="s1")
     sp2 = opts(auth_type="service_principal", tenant_id="t", client_id="c", client_secret="s2")
     assert _client_key(sp1) == _client_key(sp2)  # same principal: one client, refreshed tokens
+
+
+def _sdk_policy(**extra: str):
+    from azure.cosmos import cosmos_client
+
+    from cosmosdb_datasource.client import _client_kwargs
+
+    kwargs = _client_kwargs(parse_options({**BASE, "auth_type": "key", "account_key": "a2V5", **extra}))
+    kwargs.pop("user_agent_suffix")
+    return cosmos_client._build_connection_policy(kwargs)
+
+
+@pytest.mark.parametrize(("retries", "wait"), [("0", "0"), ("0", "60"), ("3", "7"), (None, None)])
+def test_throttle_retry_options_reach_the_sdk_including_zero(retries, wait) -> None:
+    extra = {k: v for k, v in (("throttle_max_retries", retries), ("throttle_max_wait_seconds", wait)) if v is not None}
+    policy = _sdk_policy(**extra)
+    assert policy.RetryOptions.MaxRetryAttemptCount == int(retries or 9)
+    assert policy.RetryOptions.MaxWaitTimeInSeconds == int(wait or 60)
+
+
+def test_connection_policy_keeps_the_other_client_settings() -> None:
+    policy = _sdk_policy(preferred_regions="West Europe,North Europe", connection_timeout_seconds="7")
+    assert policy.PreferredLocations == ["West Europe", "North Europe"] and policy.RequestTimeout == 7
