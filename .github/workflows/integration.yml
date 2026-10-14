@@ -1,0 +1,127 @@
+name: Integration
+
+on:
+  pull_request:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      emulator-image:
+        description: Emulator image to test against (default the pinned image in EMULATOR_IMAGE)
+        required: false
+        default: ""
+      account:
+        description: Run the Azure Cosmos DB account tests (needs the COSMOS_ENDPOINT and COSMOS_KEY secrets)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.13.1"
+  # Linux (vNext) emulator, tag vnext-EN20261008 (vnext-latest on 2026-10-08), multi-arch index.
+  EMULATOR_IMAGE: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-EN20261008@sha256:4535ddbd27bba762f3e068f7585feb0022a2559ceccc9394b23aa38d91d77c38
+  FORCE_COLOR: "1"
+
+jobs:
+  emulator:
+    name: Emulator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      COSMOS_ENDPOINT: https://localhost:8081/
+      COSMOS_EMULATOR: "1"
+      SPARK_LOCAL_IP: 127.0.0.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start the emulator
+        env:
+          IMAGE: ${{ inputs.emulator-image || env.EMULATOR_IMAGE }}
+        run: |
+          docker run --detach --name cosmos-emulator --publish 8081:8081 --publish 8080:8080 \
+            --env PROTOCOL=https --env ENABLE_EXPLORER=false --env ENABLE_TELEMETRY=false "$IMAGE"
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install the locked environment
+        run: uv sync --frozen
+      - name: Wait for the emulator
+        run: |
+          for _ in $(seq 1 90); do
+            if curl -fsS http://localhost:8080/ready > /dev/null 2>&1; then
+              curl -fsS http://localhost:8080/status
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the emulator did not become ready" >&2
+          exit 1
+      # The emulator does not authenticate requests; the SDK only needs a base64 key to sign them.
+      - name: Run the integration tests
+        run: |
+          COSMOS_KEY="$(printf 'emulator-key-is-not-checked' | base64)" \
+            uv run --frozen python -m pytest -m integration -ra --junitxml=junit-emulator.xml
+      - name: Check that only tests needing unsupported capabilities were skipped
+        run: |
+          uv run --frozen python .github/scripts/check_junit.py junit-emulator.xml tests.test_integration \
+            --allow-skip "the emulator does not support"
+      - name: Emulator logs
+        if: ${{ failure() }}
+        run: docker logs cosmos-emulator 2>&1 | tail -n 300
+
+  account:
+    name: Azure Cosmos DB account
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.account) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      HAS_ACCOUNT: ${{ secrets.COSMOS_ENDPOINT != '' && secrets.COSMOS_KEY != '' }}
+      SPARK_LOCAL_IP: 127.0.0.1
+    steps:
+      - name: Check for the account secrets
+        if: ${{ env.HAS_ACCOUNT != 'true' }}
+        run: echo "::notice::The COSMOS_ENDPOINT and COSMOS_KEY secrets are not set; the account tests are skipped."
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ env.HAS_ACCOUNT == 'true' }}
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        if: ${{ env.HAS_ACCOUNT == 'true' }}
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        if: ${{ env.HAS_ACCOUNT == 'true' }}
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+      - name: Run the integration tests
+        if: ${{ env.HAS_ACCOUNT == 'true' }}
+        env:
+          COSMOS_ENDPOINT: ${{ secrets.COSMOS_ENDPOINT }}
+          COSMOS_KEY: ${{ secrets.COSMOS_KEY }}
+          COSMOS_DATABASE: ${{ vars.COSMOS_DATABASE }}
+          COSMOS_MULTI_PARTITION_CONTAINER: ${{ vars.COSMOS_MULTI_PARTITION_CONTAINER }}
+          COSMOS_UNSUPPORTED: ${{ vars.COSMOS_UNSUPPORTED }}
+        run: uv run --frozen python -m pytest -m integration -ra --junitxml=junit-account.xml
+      - name: Check that only unconfigured tests were skipped
+        if: ${{ env.HAS_ACCOUNT == 'true' }}
+        run: |
+          uv run --frozen python .github/scripts/check_junit.py junit-account.xml tests.test_integration \
+            --allow-skip "COSMOS_MULTI_PARTITION_CONTAINER is not set" \
+            --allow-skip "COSMOS_AAD is not set" \
+            --allow-skip "disabled by COSMOS_UNSUPPORTED"

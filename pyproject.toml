@@ -85,12 +85,17 @@ fail_under = 85
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Integration tests write to (dedicated) containers and consume RU: run them explicitly with
-# `uv run pytest -m integration` (a later -m on the command line overrides this default).
+# Integration tests need a Cosmos DB endpoint: run them with `uv run pytest -m integration`
+# (a later -m on the command line overrides this default).
 addopts = "-m 'not integration'"
 markers = [
-    "integration: needs a real Cosmos DB account (config/cosmos.local.json); skipped otherwise",
+    "integration: needs a Cosmos DB account or emulator (COSMOS_ENDPOINT, COSMOS_KEY); skipped otherwise",
     "spark: needs a local SparkSession (Java 17+); skipped otherwise",
+    "requires_avad: needs the AllVersionsAndDeletes change feed (not in the emulator)",
+    "requires_epk_ranges: needs EPK sub-range filtering of queries and change feed (not in the emulator)",
+    "requires_multi_partition: needs a container with several physical partitions (not in the emulator)",
+    "requires_session_tokens: needs Session consistency with enforced session tokens (not in the emulator)",
+    "requires_aad: needs Entra ID credentials for DefaultAzureCredential (not in the emulator)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:pyspark.*",
