@@ -118,6 +118,28 @@ def clip_positions(positions: list[Position], previous: list[Position], lo: str,
     return out
 
 
+def split_positions(positions: list[Position], physical: list[tuple[str, str]], lo: str, hi: str) -> list[Position]:
+    """Split the positions of ``[lo, hi)`` at the current physical partition boundaries.
+
+    Each piece keeps the LSN of the position it comes from, as a child partition continues its
+    parent's LSN sequence.
+    """
+    out = sorted(
+        {
+            Position(max(p.lo, lo, a), min(p.hi, hi, b), p.lsn)
+            for p in positions
+            for a, b in physical
+            if max(p.lo, lo, a) < min(p.hi, hi, b)
+        },
+        key=lambda p: (p.lo, p.hi),
+    )
+    if not (out and out[0].lo == lo and out[-1].hi == hi and all(x.hi == y.lo for x, y in pairwise(out))):
+        raise CosmosChangeFeedError(
+            f"Cannot rebuild the change feed continuation of range [{lo!r}, {hi!r}); the task will be retried by Spark."
+        )
+    return out
+
+
 def _outside(positions: list[Position], lo: str, hi: str) -> bool:
     return any(p.lo < lo or p.hi > hi for p in positions)
 
@@ -181,6 +203,7 @@ def read_bounded(
     lo: str = "",
     hi: str = "FF",
     rebuild_token: Callable[[list[Position]], str] | None = None,
+    replan: Callable[[list[Position]], str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield every change-feed item with ``start_lsn < lsn <= end_lsn`` exactly once.
 
@@ -198,6 +221,12 @@ def read_bounded(
     * Transient errors resume from the last fully consumed page (no duplicates, no gaps).
     * If the SDK widens the scope after a split (children outside ``[lo, hi)``), the page is
       discarded and the read resumes from a token clipped to ``[lo, hi)`` (``clip_positions``).
+    * A partition that is gone (410) after the SDK's own handling, or a ``RecursionError`` from it,
+      is retried like a transient error; ``replan(positions)`` then rebuilds the continuation from
+      the current topology. azure-cosmos 4.17.1 handles a 410 by calling ``fetch_next_block``
+      again without a bound (``ChangeFeedFetcherV2``), so while it keeps getting 410 for a range it
+      fails with ``RecursionError``; a continuation built from freshly read partitions holds no gone
+      range.
     """
     resume: str | None = None
     attempt = 0
@@ -248,12 +277,16 @@ def read_bounded(
                 if page.drained:
                     break
         except Exception as exc:
-            if isinstance(exc, CosmosChangeFeedError) or not retry.is_transient(exc):
+            gone = isinstance(exc, RecursionError) or retry.status_code(exc) == 410
+            if isinstance(exc, CosmosChangeFeedError) or not (gone or retry.is_transient(exc)):
                 raise
             attempt += 1
             stats.retries += 1
             if attempt > policy.max_retries:
                 raise
+            if gone and replan is not None:
+                resume = replan(accepted)
+                stats.extra["replans"] = stats.extra.get("replans", 0) + 1
             delay = policy.delay(attempt, exc)
             retry.log_retry(f"reading the change feed of {describe}", attempt, policy.max_retries, delay, exc)
             retry.sleep(delay)

@@ -47,7 +47,7 @@ from cosmosdb_datasource import _compat, client, epk, retry
 from cosmosdb_datasource._base import CosmosReaderBase
 from cosmosdb_datasource.auth import SecretToken
 from cosmosdb_datasource.batch import CosmosQueryPartition, QueryStats, query_documents, split_feed_ranges
-from cosmosdb_datasource.changefeed import ReadStats, build_composite_continuation, read_bounded
+from cosmosdb_datasource.changefeed import ReadStats, build_composite_continuation, read_bounded, split_positions
 from cosmosdb_datasource.documents import ChangeRecord, PartitionKeyInfo, to_change_record, to_snapshot_record
 from cosmosdb_datasource.errors import CosmosConfigError, CosmosOffsetError
 from cosmosdb_datasource.offsets import Offset, RangeState, SnapshotState, min_overlapping_lsn, rekey
@@ -460,6 +460,13 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
             hi=partition.hi,
             rebuild_token=lambda children: build_composite_continuation(
                 partition.rid, mode, partition.lo, partition.hi, children
+            ),
+            replan=lambda positions: build_composite_continuation(
+                partition.rid,
+                mode,
+                partition.lo,
+                partition.hi,
+                split_positions(positions, backend.feed_ranges(force_refresh=True), partition.lo, partition.hi),
             ),
         )
         emitted = 0
