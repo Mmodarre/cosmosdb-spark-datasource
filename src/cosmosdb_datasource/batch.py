@@ -227,6 +227,9 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
         logger.info("cosmosdb batch read planned: %d feed range(s), %d partition(s)", len(ranges), len(parts))
         return parts
 
+    def _query(self) -> tuple[str, list[dict[str, Any]] | None]:
+        return self._opts.query, self._opts.parameters_for_sdk()
+
     def read(self, partition: InputPartition | None) -> Iterator[tuple[Any, ...]]:
         if partition is None:  # Spark substitutes [None] for an empty partition list
             return
@@ -238,10 +241,11 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
         describe = f"range {epk.range_key(partition.lo, partition.hi)}"
         stats = QueryStats()
         rows = 0
+        query, parameters = self._query()
         docs = query_documents(
             self._backend(partition.token),
-            opts.query,
-            opts.parameters_for_sdk(),
+            query,
+            parameters,
             (partition.lo, partition.hi),
             opts.page_size,
             policy=self._retry_policy(),

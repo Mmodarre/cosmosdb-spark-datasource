@@ -206,6 +206,53 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `raw_json_column` | `body` | Name of the column holding the whole document |
 | `corrupt_record_column` | `_corrupt_record` | Column that receives the JSON of malformed documents (only if it is in the schema) |
 | `log_metrics` | `false` | Log per-partition metrics (rows, pages, RU, retries, duration) at WARNING, so they appear in executor logs |
+| `filter_pushdown` | `false` | `true`: push Spark filters into the query (PySpark 4.1+; needs `spark.sql.python.filterPushdown.enabled=true`, else planning fails with `DATA_SOURCE_PUSHDOWN_DISABLED`). `auto`: push only while that conf is true. See [Filter pushdown](#filter-pushdown). |
+
+### Filter pushdown
+
+With `filter_pushdown=true` and the Spark conf `spark.sql.python.filterPushdown.enabled=true`, the
+filters of a batch read become part of the query, so the service returns only matching documents:
+
+```python
+spark.conf.set("spark.sql.python.filterPushdown.enabled", "true")
+critical = (
+    spark.read.format("cosmosdb")
+    .options(**conn, container="events", filter_pushdown="true")
+    .load()
+    .filter("severity = 'critical'")
+)
+```
+
+- **Pushed**: `=`, `<=>`, `<`, `<=`, `>`, `>=`, `IN`, `IS NULL`, `LIKE 'a%'`, `LIKE '%a'` and
+  `LIKE '%a%'`, each optionally negated, on STRING, integer, DOUBLE and BOOLEAN columns that are
+  document properties (struct fields included), and on `pk`, `id`, `_ts` and `_etag`. Spark pushes
+  a conjunction of such filters; it does not push `OR`.
+- **Semantics are Spark's.** Spark compares converted values, the service raw JSON, so each filter
+  is pushed as a condition every matching document meets, with values as query parameters. A
+  comparison on a property also lets through documents where the property has another JSON type
+  or is missing under its exact name (it may be read case-insensitively), e.g.
+  `c["severity"] = @p OR NOT IS_STRING(c["severity"])`, and Spark applies the filter again. Only
+  filters on `id`, `_rid`, `_self`, `_etag` (STRING), `_ts` (BIGINT) and `pk = '<string>'` (a string
+  that is not also JSON text such as `5` or `true`) are left to the service alone. Measured on an
+  account, `severity = 'critical'` (1% of 200,000 documents) read 1,942 documents for 81 RU in
+  4 s, where the full scan that Spark would filter costs 4,603 RU and 66 s.
+- **`query`** must be `SELECT * FROM <alias> [WHERE ...]`: the filters are added to its `WHERE`.
+  Other queries (projections, `VALUE`, `JOIN`, `ORDER BY`, `TOP`, ...) push nothing; Spark filters.
+- **One `load()` per filtered query.** Spark 4.1 to 4.3 store the read planned with pushed filters
+  on the loaded relation and reuse it for every other scan of that DataFrame or view: a later query
+  without pushable filters, or a union or self-join with different filters, reads only the
+  documents of the earlier filter, and returns too few rows. Load a new DataFrame for each query
+  that filters differently. (Spark's main branch scopes the planned read to its scan.)
+- Not pushed: TIMESTAMP, DATE, DECIMAL, FLOAT, BINARY and complex-type columns, `body`,
+  `feed_range`, hierarchical `pk`, integers beyond ±2^53, range comparisons with strings containing
+  characters from U+D800 up, and `IS NOT NULL` on properties.
+- Projections are not pushed: the Python data source API passes no required columns. Use a
+  projecting `query` instead.
+- Documents a pushed filter excludes are not converted, so with `FAILFAST` a malformed document
+  that the filter excludes no longer fails the read.
+- PySpark 4.0 has no pushdown API, and the option does nothing there. Where the conf cannot be set
+  (Databricks serverless restricts Spark confs), `auto` reads without pushdown and `true` fails.
+  The generated query is logged at INFO (without parameter values).
 
 ### Streaming reads (change feed)
 
@@ -517,7 +564,8 @@ snapshots = spark.readStream.format("cosmosdb").options(**conn, container="custo
 - Raise (auto)scale throughput temporarily for initial loads, use `priority=Low` to protect OLTP
   traffic, and raise `throttle_max_wait_seconds` for long scans of throttled containers.
 - A projecting `query` (`SELECT c.id, c.status, c._ts FROM c`) cuts RU, bandwidth and JSON work
-  when the whole document is not needed.
+  when the whole document is not needed. A selective filter cuts them far more: push it with
+  [filter pushdown](#filter-pushdown) or write it into `query`.
 - Set `preferred_regions` to the region closest to the Spark cluster.
 - `log_metrics=true` logs one line per partition with rows, pages, RU, retries and duration
   (for queries also `replans`, splits handled during the read, and `duplicates`, re-created
@@ -535,9 +583,9 @@ snapshots = spark.readStream.format("cosmosdb").options(**conn, container="custo
   splits during the read; a document deleted and re-created during the read is returned in the
   version the read reached first. A projecting `query` without `id` is not de-duplicated.
 - `query` runs per partition; global `ORDER BY`, `GROUP BY`, `DISTINCT`, `TOP`/`OFFSET` and
-  aggregates belong in Spark. Spark filters are not pushed down: filter pushdown for Python
-  sources (PySpark 4.1+) needs a Spark conf that serverless compute does not expose, and planning
-  fails if a reader implements it while the conf is off.
+  aggregates belong in Spark. Filter pushdown is opt-in, needs PySpark 4.1+ and a Spark conf, and
+  needs a fresh `load()` per filtered query on Spark 4.1 to 4.3 (see
+  [Filter pushdown](#filter-pushdown)).
 - `LatestVersion` does not emit deletes. `AllVersionsAndDeletes` starts only at `Now`, and its
   history is bounded by the continuous-backup retention: a stream stopped longer than that needs a
   new checkpoint.
@@ -594,6 +642,7 @@ snapshots = spark.readStream.format("cosmosdb").options(**conn, container="custo
   snapshot SCD2, LatestVersion SCD1 and AllVersionsAndDeletes + `initial_snapshot` SCD1 pipelines,
   and a reconcile job.
 - [examples/lhp/](examples/lhp/): the same patterns as a Lakehouse Plumber project.
+- [docs/PARITY.md](docs/PARITY.md): read-side parity with the Azure Cosmos DB Spark connector.
 - [docs/DESIGN.md](docs/DESIGN.md): SDK and PySpark findings, offsets, the determinism and
   initial-snapshot arguments, and the test strategy.
 - [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md), [RELEASING.md](RELEASING.md),

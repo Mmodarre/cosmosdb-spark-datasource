@@ -44,7 +44,7 @@ from pyspark import cloudpickle
 from pyspark.sql.types import ArrayType, LongType, StringType, StructField, StructType, TimestampType
 
 from tests.conftest import java_major
-from tests.harness import StreamHarness, make_source, run_batch, validate_rows
+from tests.harness import StreamHarness, make_source, run_batch, run_batch_with_filters, validate_rows
 
 ENDPOINT = os.environ.get("COSMOS_ENDPOINT", "")
 KEY = os.environ.get("COSMOS_KEY", "")
@@ -322,6 +322,30 @@ def test_batch_auto_partitioning(seeded) -> None:
     rows, parts = run_batch(options(name, partitions_per_feed_range="auto"))
     assert len(parts) % feed_range_count(container) == 0
     assert len(rows) == n
+
+
+def test_filter_pushdown_returns_what_spark_filtering_returns(make_container) -> None:
+    """The pushed predicates against the service's own query engine: type-strict comparisons, undefined."""
+    from tests.test_pushdown import SCHEMA, random_document, random_filter, spark_eval
+
+    name, container = make_container()
+    rng = random.Random(11)
+    for i in range(120):
+        doc = random_document(rng, i)
+        if "pk" not in doc or doc["pk"] is None:
+            doc["pk"] = "p0"  # documents without a partition key value are rejected by some endpoints
+        container.upsert_item(doc)
+    all_rows, _ = run_batch(options(name), SCHEMA)
+    assert len(all_rows) == 120
+    ts_values = sorted({r[2] for r in all_rows})
+    reduced = 0
+    for _ in range(40):
+        filters = [random_filter(rng, ts_values) for _ in range(rng.randint(1, 3))]
+        expected = sorted(repr(r) for r in all_rows if all(spark_eval(f, r) is True for f in filters))
+        rows, _parts, remaining = run_batch_with_filters(options(name, filter_pushdown="true"), SCHEMA, filters)
+        assert sorted(repr(r) for r in rows if all(spark_eval(f, r) is True for f in remaining)) == expected, filters
+        reduced += len(rows) < len(all_rows)
+    assert reduced > 10
 
 
 @requires("requires_epk_ranges")
