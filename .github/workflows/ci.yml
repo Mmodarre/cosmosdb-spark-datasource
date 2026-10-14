@@ -148,6 +148,9 @@ jobs:
     needs: test
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -169,6 +172,15 @@ jobs:
           uv run --frozen --only-group coverage coverage xml -o coverage.xml
           uv run --frozen --only-group coverage coverage html -d htmlcov
           uv run --frozen --only-group coverage coverage report
+      # Pull requests from forks get no OIDC token; the action then uploads without one.
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: coverage.xml
+          disable_search: true
+          plugins: noop
+          use_oidc: true
+          fail_ci_if_error: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Upload the coverage report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -4,9 +4,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
     groups:
       github-actions:
         patterns: ["*"]
+        update-types: [minor, patch]
     commit-message:
       prefix: ci
 
@@ -14,10 +18,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
     groups:
-      development:
-        dependency-type: development
-      runtime:
-        dependency-type: production
+      python:
+        patterns: ["*"]
+        update-types: [minor, patch]
     commit-message:
-      prefix: deps
+      prefix: build(deps)

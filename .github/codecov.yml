@@ -1,0 +1,18 @@
+# These statuses are not required checks; the coverage floor that gates merges is fail_under in
+# pyproject.toml.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: 80%
+
+comment:
+  layout: "condensed_header, condensed_files, condensed_footer"
+
+ignore:
+  - "tests"
+  - "examples"

@@ -46,8 +46,8 @@ reads it from the installed distribution's metadata.
    git push origin vX.Y.Z
    ```
 
-5. Follow the run under **Actions -> Release**. If the PyPI environments require reviewers, approve
-   the deployments there.
+5. Follow the run under **Actions -> Release** and approve the `testpypi` and `pypi` deployments
+   there (**Review deployments**).
 
 A file that was uploaded to PyPI cannot be replaced, even after deleting it. If a published
 release is broken, [yank](https://pypi.org/help/#yanked) it on PyPI and release a new version.
@@ -55,7 +55,8 @@ release is broken, [yank](https://pypi.org/help/#yanked) it on PyPI and release 
 ### Deleting a release
 
 To remove a GitHub Release together with its tag, for example after testing the workflow with a
-pre-release tag:
+pre-release tag, set the `release tags` ruleset to **Disabled** first (see
+[Repository rules](#repository-rules)), and back to **Active** afterwards:
 
 ```bash
 gh release delete vX.Y.ZrcN --cleanup-tag --yes
@@ -83,11 +84,23 @@ listed under the project's **Settings -> Publishing**.
 
 ### GitHub environments
 
-In the repository's **Settings -> Environments**, create the environments `pypi` and `testpypi`.
-Recommended protection for both:
+The environments `pypi` and `testpypi` (**Settings -> Environments**) accept deployments only from
+tags `v*`, and each upload waits for an approval by `@Mmodarre` (self-review allowed,
+administrators cannot bypass it).
 
-- **Deployment branches and tags**: selected tags only, pattern `v*`;
-- **Required reviewers**: the maintainers, so that every upload is approved.
+### Repository rules
+
+The rulesets under **Settings -> Rules -> Rulesets** have no bypass list, so they apply to
+administrators as well:
+
+- `main`: changes arrive only through squash-merged pull requests. `CI passed`, `Emulator (vnext)`
+  and `Emulator (legacy)` must pass on a branch that is up to date with `main`
+  (`gh pr update-branch`), and review threads must be resolved. No force pushes, no deletion.
+- `release tags`: tags `v*` cannot be deleted or moved.
+
+Workflows may use GitHub-owned actions and `astral-sh/setup-uv`, `codecov/codecov-action` and
+`pypa/gh-action-pypi-publish`, each pinned to a full commit SHA. A new third-party action must
+first be allowed under **Settings -> Actions -> General**.
 
 ### Repository variables
 
