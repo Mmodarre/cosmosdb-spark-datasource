@@ -46,6 +46,7 @@ def spark(tmp_path_factory: pytest.TempPathFactory):
     session.dataSource.register(CosmosDBDataSource)
     yield session
     session.stop()
+    os.environ.pop("FAKE_COSMOS_DIR", None)  # later tests use in-memory stores
 
 
 def _store(name: str, partitions: int = 3, docs: int = 500) -> FakeCosmosStore:
@@ -96,3 +97,63 @@ def test_stream_available_now(spark, tmp_path: Path) -> None:
     query.awaitTermination(300)
     out = spark.read.parquet(str(tmp_path / "out"))
     assert out.count() == 340 and out.select("id").distinct().count() == 340
+
+
+PUSHDOWN_EXPRESSIONS = [
+    "id = 'd005'",
+    "id >= 'd070' AND _ts > 0",
+    "s = 'a'",
+    "s <> 'a'",
+    "s LIKE 'a%' OR s LIKE '%b'",
+    "s IN ('a', 'b', '5') AND n > 0",
+    "s IS NULL",
+    "n BETWEEN 0 AND 2",
+    "d < 1.6",
+    "b",
+    "NOT b",
+    "st.k = 'k1'",
+    "pk = '5'",
+    "pk IN ('p1', 'true', 'null')",
+    "NOT (pk = 'p2')",
+]
+
+
+def _filter_pushdown_supported() -> bool:
+    from pyspark.sql.datasource import DataSourceReader
+
+    return hasattr(DataSourceReader, "pushFilters")  # PySpark >= 4.1
+
+
+def test_filter_pushdown_matches_spark_filtering(spark) -> None:
+    import random
+
+    from tests.test_pushdown import SCHEMA, random_document
+
+    store = FakeCosmosStore("spark_pushdown", partitions=3).register()
+    rng = random.Random(7)
+    for i in range(120):
+        store.upsert(random_document(rng, i))
+    conf = "spark.sql.python.filterPushdown.enabled"
+
+    def load(pushdown: str):
+        # A fresh relation per query: Spark 4.1 to 4.3 reuse the read planned with pushed filters for
+        # every later scan of the same loaded DataFrame (README, "Filter pushdown").
+        options = fake_options(store, filter_pushdown=pushdown)
+        return spark.read.format("cosmosdb").schema(SCHEMA).options(**options).load()
+
+    try:
+        for expr in PUSHDOWN_EXPRESSIONS:
+            spark.conf.set(conf, "false")
+            expected = sorted(map(repr, load("auto").filter(expr).collect()))
+            spark.conf.set(conf, "true")
+            assert sorted(map(repr, load("true").filter(expr).collect())) == expected, expr
+            assert sorted(map(repr, load("auto").filter(expr).collect())) == expected, expr
+        if _filter_pushdown_supported():
+            plan = load("auto").filter("id = 'd005' AND s = 'a'")._jdf.queryExecution().executedPlan().toString()
+            (spark_filter,) = [line for line in plan.splitlines() if " Filter (" in line]
+            assert "s#" in spark_filter and "id#" not in spark_filter, plan  # id is exact, s is re-checked
+            spark.conf.set(conf, "false")
+            with pytest.raises(Exception, match="DATA_SOURCE_PUSHDOWN_DISABLED"):
+                load("true").filter("id = 'd005'").collect()
+    finally:
+        spark.conf.unset(conf)

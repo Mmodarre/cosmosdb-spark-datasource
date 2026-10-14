@@ -127,6 +127,7 @@ KNOWN_OPTIONS = frozenset(
         "initial_snapshot_delay_seconds",
         "snapshot_stream",
         "snapshot_interval_seconds",
+        "filter_pushdown",
         TEST_BACKEND_OPTION,
         # Spark may add "path" when .load(path) is used; we ignore it.
         "path",
@@ -267,6 +268,7 @@ class CosmosOptions:
     initial_snapshot_delay_seconds: float = DEFAULT_INITIAL_SNAPSHOT_DELAY_SECONDS
     snapshot_stream: bool = False
     snapshot_interval_seconds: float = 0.0
+    filter_pushdown: str = "false"  # "false" | "true" | "auto"
     stream_options_present: tuple[str, ...] = ()
     query_explicit: bool = False
     test_backend: str | None = None
@@ -396,6 +398,19 @@ def _parse_partitions_per_feed_range(raw: str | None) -> int | str:
     return value
 
 
+def _parse_filter_pushdown(raw: str | None) -> str:
+    if raw is None:
+        return "false"
+    lowered = raw.strip().lower()
+    if lowered == AUTO:
+        return AUTO
+    if lowered in ("true", "1", "yes"):
+        return "true"
+    if lowered in ("false", "0", "no"):
+        return "false"
+    raise CosmosConfigError(f"Option 'filter_pushdown' must be true, false or auto, got {raw!r}.")
+
+
 def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
     """Validate raw Spark options and return a typed, immutable configuration."""
     opts = _normalize(options)
@@ -517,6 +532,7 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
         ),
         snapshot_stream=snapshot_stream,
         snapshot_interval_seconds=_float(opts, "snapshot_interval_seconds", 0.0, minimum=0.0),
+        filter_pushdown=_parse_filter_pushdown(_get(opts, "filter_pushdown")),
         stream_options_present=tuple(n for n in STREAM_ONLY_OPTIONS if _get(opts, n) is not None),
         query_explicit=query is not None,
         test_backend=test_backend,

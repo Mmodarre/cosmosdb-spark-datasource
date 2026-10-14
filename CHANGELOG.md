@@ -10,6 +10,10 @@ First public release.
 
 ### Added
 
+- Filter pushdown for batch reads (`filter_pushdown=true` or `auto`, PySpark 4.1+ with
+  `spark.sql.python.filterPushdown.enabled=true`): comparisons, `IN`, `IS NULL` and `LIKE`
+  prefix, suffix and substring filters become parameterized `WHERE` predicates of the query. Spark
+  re-applies every filter except those on system properties and plain-string `pk` equality.
 - Batch reads with `spark.read.format("cosmosdb")`: one Spark partition per feed range, optional
   EPK sub-splitting (`partitions_per_feed_range`, including `auto`), and a server-side `query` with
   `query_parameters`.

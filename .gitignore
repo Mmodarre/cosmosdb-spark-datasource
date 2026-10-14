@@ -33,3 +33,4 @@ junit*.xml
 .idea/
 .vscode/
 *.swp
+.local/

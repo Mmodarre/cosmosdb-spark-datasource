@@ -9,9 +9,10 @@ semantics:
 * change-feed reads resume after an LSN, report per-child positions in an SDK-format composite
   continuation token, round-robin over children after a split, and return a drained page (HTTP
   304) carrying the partition's current LSN,
-* queries return documents in ``_rid`` order and resume after the last ``_rid`` (as the service
-  does), so a document that is not modified during a query is returned exactly once, a replaced
-  document keeps its place, and a deleted and re-created document comes again at the end,
+* queries apply their WHERE clause with the service's semantics (``tests/fake_query.py``), return
+  documents in ``_rid`` order and resume after the last ``_rid`` (as the service does), so a
+  document that is not modified during a query is returned exactly once, a replaced document keeps
+  its place, and a deleted and re-created document comes again at the end,
 * a split while a query runs is handled like azure-cosmos 4.17.1 (the range restarts from its
   beginning if it now spans several partitions, or continues on the single child) or, with
   ``query_split="raise"``, like 4.14.0 (HTTP 410/1002); every page names the partitions that served it,
@@ -46,6 +47,7 @@ from cosmosdb_datasource.backend import QueryPage
 from cosmosdb_datasource.changefeed import ChangeFeedPage, decode_positions
 from cosmosdb_datasource.documents import PartitionKeyInfo
 from cosmosdb_datasource.options import MODE_ALL_VERSIONS_AND_DELETES
+from tests.fake_query import compile_query
 
 _REGISTRY: dict[str, FakeCosmosStore] = {}
 _LOCK = threading.RLock()
@@ -365,6 +367,7 @@ class FakeBackend:
         several children (azure-cosmos 4.17.1); with ``query_split="raise"`` it fails with 410/1002.
         """
         lo, hi = rng
+        matches = compile_query(query, parameters)
         after = json.loads(continuation)["rid"] if continuation else 0
         serving: str | None = None  # the partition of a single-partition read
         queue: list[list[Any]] | None = None  # [lo, hi, after] per partition of a multi-partition read
@@ -397,7 +400,10 @@ class FakeBackend:
                 for v in part.log:
                     if q_lo <= v.epk < q_hi and v.lsn <= visible:
                         latest[(json.dumps(v.pk), v.id)] = v
-                docs = sorted((v for v in latest.values() if v.op != "delete" and v.rid > q_after), key=lambda v: v.rid)
+                docs = sorted(
+                    (v for v in latest.values() if v.op != "delete" and v.rid > q_after and matches(v.doc or {})),
+                    key=lambda v: v.rid,
+                )
                 page = docs[:page_size]
                 more = len(docs) > page_size
                 store.call_log.append(["query_page", q_lo, q_hi, session_token, len(page)])

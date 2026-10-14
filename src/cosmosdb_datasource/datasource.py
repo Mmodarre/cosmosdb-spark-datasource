@@ -5,9 +5,9 @@ from __future__ import annotations
 from pyspark.sql.datasource import DataSource, DataSourceReader, DataSourceStreamReader
 from pyspark.sql.types import StructType
 
-from cosmosdb_datasource._compat import local_struct_type
+from cosmosdb_datasource._compat import filter_pushdown_planner, local_struct_type
 from cosmosdb_datasource.errors import CosmosConfigError
-from cosmosdb_datasource.options import STREAM_ONLY_OPTIONS, parse_options
+from cosmosdb_datasource.options import AUTO, STREAM_ONLY_OPTIONS, parse_options
 from cosmosdb_datasource.schema import batch_schema, change_feed_schema, snapshot_stream_schema
 
 
@@ -49,6 +49,16 @@ class CosmosDBDataSource(DataSource):
             raise CosmosConfigError(
                 f"Option(s) {', '.join(stream_only)} only apply to spark.readStream; remove them for batch reads."
             )
+        pushdown = self._opts.filter_pushdown
+        # A reader with pushFilters fails planning while spark.sql.python.filterPushdown.enabled is false
+        # (DATA_SOURCE_PUSHDOWN_DISABLED), so "auto" returns it only to Spark's pushdown planner, which
+        # runs only when the conf is true. Pushdown is opt-in because Spark 4.1 to 4.3 cache the read
+        # planned with pushed filters on the loaded relation and reuse it for its other scans (README,
+        # "Filter pushdown").
+        if pushdown == "true" or (pushdown == AUTO and filter_pushdown_planner()):
+            from cosmosdb_datasource.pushdown import CosmosPushdownBatchReader
+
+            return CosmosPushdownBatchReader(self._opts, schema)
         from cosmosdb_datasource.batch import CosmosBatchReader
 
         return CosmosBatchReader(self._opts, schema)

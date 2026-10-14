@@ -46,7 +46,7 @@ Measured costs (service, 400 RU/s containers; RU scales roughly with document si
 | Stream reader 4.0/4.1 | `latestOffset()` is called **without arguments** (`streaming/python_streaming_source_runner.py:65-66`). The JVM class implements `AcceptsLatestSeenOffset`: on restart it calls `partitions(offset, offset)` with the last logged offset (`PythonMicroBatchStream.scala:86-89`). `planInputPartitions` may run several times per micro-batch (`:47`). The streaming runner is a long-lived Python process; read tasks use a **different, fresh** reader instance. | v4.0.1 = v4.1.0 |
 | Call order 4.0/4.1 | **New query:** `latestOffset()` is called **before** `initialOffset()`: `constructNextBatch` calls `s.latestOffset()` for a plain `MicroBatchStream`, and `initialOffset` is only used when the batch plan is built (`MicroBatchExecution.scala` v4.0.1 `:736`, `getStartOffset` `:573-583`). The reader therefore resolves and **caches** the initial offset inside `latestOffset()` when it has no start, so Spark's later `initialOffset()` returns the identical offset. **Restart:** `initializeExecution` calls `setLatestSeenOffsetOnSources(offsetLog.getLatest())` before `populateStartOffsets` (`:317-319`), so the start is always known. **`Trigger.AvailableNow`** on a source without `SupportsTriggerAvailableNow` falls back to a **single batch** unless `spark.sql.streaming.triggerAvailableNowWrapper.enabled` is set (`:98-128`, SPARK-45178). | v4.0.1 |
 | Admission control | Only in **4.2**: `latestOffset(start, limit)`, `getDefaultReadLimit()`, `ReadAllAvailable` / `ReadMaxRows` / ..., and `SupportsTriggerAvailableNow` (`datasource.py:715, 769`; `pyspark/sql/streaming/datasource.py`). The runner turns it on when `inspect.signature(reader.latestOffset)` has parameters (`python_streaming_source_runner.py:142-163`), and the JVM then uses `PythonMicroBatchStreamWithAdmissionControl` / `...WithTriggerAvailableNow` (`PythonMicroBatchStream.scala:118, 151`), which have no `setLatestSeenOffset`. | v4.2.0 |
-| Filter pushdown | `pushFilters` exists from 4.1 (`datasource.py:519`), behind `spark.sql.python.filterPushdown.enabled` (**default false**, `SQLConf.scala:5452`). If a reader overrides `pushFilters` while the conf is off, planning **fails** with `DATA_SOURCE_PUSHDOWN_DISABLED` (`plan_data_source_read.py:383`, 4.1 and 4.2). Serverless restricts Spark confs, so `pushFilters` is **deliberately not implemented**. Server-side filtering is done with the `query` option. | v4.1.0 |
+| Filter pushdown | `pushFilters` exists from 4.1 (`datasource.py:519`), behind `spark.sql.python.filterPushdown.enabled` (**default false**, `SQLConf.scala:5452`). If a reader overrides `pushFilters` while the conf is off, planning **fails** with `DATA_SOURCE_PUSHDOWN_DISABLED` (`plan_data_source_read.py:383`, 4.1 and 4.2). With the conf on, `PythonScanBuilder.pushFilters` runs the planner `worker/data_source_pushdown_filters.py`, which calls `reader()`, then `pushFilters`, then plans the read; filters arrive as a conjunction of leaves, each optionally negated (`UserDefinedPythonDataSourceFilterPushdownRunner`: "And, Or are currently not supported"), and a filter only counts as pushed if it is not returned. The planned read info is stored on the provider-scoped `PythonDataSourceV2` (`setReadInfo`) and reused by every later scan of the relation (`getOrCreateReadInfo`), up to v4.3.0-rc2; Spark's main branch carries it in the `PythonScan`. `PythonScanBuilder` has no `SupportsPushDownRequiredColumns`: `reader()` always gets the full schema. See §4, "Filter pushdown". | v4.1.0, v4.2.0, master |
 | `SimpleDataSourceStreamReader` | Reads data inside the driver-side runner (no parallelism), so it is unsuitable for large containers and not used. | |
 | **Databricks serverless** (environment version 4) | Data source workers run the engine PySpark `_engine_pyspark` (`__version__` 4.4.0.dev0, `/databricks/spark/python/_engine_pyspark.zip`), while `import pyspark` in the same process gives the environment's client PySpark 4.0.0 (databricks-connect). `pyspark is _engine_pyspark` is False. The engine's batch planner converts the schema to client classes (`_client_parse_datatype_json_string`, a Databricks addition), but `streaming/python_streaming_source_runner.py` passes `_engine_pyspark.sql.types.StructType` to `streamReader()`. The runner enables admission control by the `latestOffset` signature. It serializes `getDefaultReadLimit()` as `dataclasses.asdict(limit) \| {"_type": class name}`, rebuilds limits from a name registry of *its own* classes, calls `reportLatestOffset()` (not in the client 4.0 base class), and checks `isinstance(reader, _engine_pyspark...SupportsTriggerAvailableNow)`. Handled in `_compat.py` (§5, "Databricks engine compatibility"). | engine sources read from a serverless worker |
 | **Lakeflow SDP serverless** (DBR 18.3) | Pipeline Python is a classic PySpark session behind a Py4J allow-list (`spark.catalog.tableExists` is rejected with `Py4JSecurityException`). Triggered updates run capped streams as many AvailableNow batches. | pipeline event logs |
@@ -63,6 +63,7 @@ cosmosdb_datasource/
   epk.py          EPK sub-splitting, covers, overlay
   batch.py        CosmosBatchReader / CosmosQueryPartition; feed-range planning and the resumable
                   query loop, shared with the initial snapshot
+  pushdown.py     CosmosPushdownBatchReader (pushFilters): Spark filters to WHERE predicates
   stream.py       CosmosStreamReader / CosmosChangeFeedPartition / CosmosSnapshotPartition, budget allocation
   snapshot_stream.py  CosmosSnapshotStreamReader / CosmosSnapshotStreamPartition (snapshot_stream=true)
   changefeed.py   continuation-token codec, LSN-bounded read loop
@@ -150,6 +151,65 @@ handling). Splits before the first page and mid-read, with 1, 3 and 4 sub-ranges
 splits in one read, the initial snapshot and snapshot streams, deletes and re-creates of documents
 already read and not yet read, replaces, and a randomized mix of splits and writes; with the
 previous query loop 23 of these tests fail.
+
+### Filter pushdown
+
+`filter_pushdown=true` makes `reader()` return `CosmosPushdownBatchReader`, the batch reader plus
+`pushFilters`; `auto` returns it only when `reader()` is called from Spark's pushdown planner (a
+frame of a module named `*.sql.worker.data_source_pushdown_filters`, by `__name__` or `__spec__`,
+which also matches the Databricks engine's copy), so it never meets the
+`DATA_SOURCE_PUSHDOWN_DISABLED` check. It is opt-in because of Spark's read-info reuse (§2): with
+pushdown, the read planned for one filtered query is reused by other scans of the same loaded
+relation, which then miss documents. No reader-side fix exists: the reader is not called for a scan
+that reuses the read info.
+
+**Translation.** Spark compares converted values, the service raw JSON. For each filter the
+translator computes two predicates on the raw document: `true` holds on every document whose row
+makes the filter true, `false` on every one that makes it false (not NULL). `Not` swaps them, so a
+negated filter needs no complement of a three-valued service predicate; `And`/`Or` combine them as
+`true = T_a AND T_b`, `false = F_a OR F_b` (and dually), where a missing predicate means "no
+condition". Each predicate is either *exact* (equivalent) or only *necessary*. The `true` predicate
+of every filter is added to the `WHERE` clause; the filter is returned to Spark unless it is exact.
+So a pushed read returns a superset of the matching documents, and Spark's own filter makes the
+result exact, whatever the conversion rules.
+
+- A property comparison is exact only for documents whose value has the JSON type of the column
+  (string for STRING, number for integer and DOUBLE columns, boolean for BOOLEAN), and only if the
+  exact property name is present (the reader falls back to a case-insensitive match). Hence
+  `true = cmp OR NOT IS_<TYPE>(x)` and `false = NOT (IS_<TYPE>(x) AND cmp)`; both are true or false,
+  never undefined, because type-check functions always return booleans and a cross-type comparison
+  is undefined (`false AND undefined` is false). Against the account the guards cost about 2 RU on
+  a 79 RU equality filter over 200,000 documents, and `OR NOT IS_NUMBER` raised a 2,000-row range
+  filter from 82 to 187 RU, still 4% of the 4,605 RU full scan (cross-partition SDK queries,
+  7 partitions).
+- System properties (`id`, `_rid`, `_self`, `_etag`, `_ts`) exist on every document with a fixed
+  type, so their comparisons are exact. `pk` equality with a string that does not parse as JSON
+  is exact (only a string key renders as such a string); otherwise the number, boolean or null the
+  string also denotes is added as a candidate and Spark re-checks.
+- Integers beyond ±2^53 are not pushed (the service compares doubles; below that, rounding is
+  monotonic and exact). Range comparisons with a string containing a character from U+D800 up are
+  not pushed: below it, UTF-16 code-unit order and Spark's code-point order agree.
+- `IS NULL` is pushed only for top-level STRING properties (conversion to STRING never fails; a
+  nested field is also NULL when a sibling fails conversion), `IS NOT NULL` not at all for
+  properties (it would only exclude explicit nulls). `x IN (..., NULL)` is never false, so its
+  `false` predicate is `false`.
+- The user `query` must be `SELECT * FROM <alias> [WHERE ...]` (a tokenizer ignores string
+  literals and bracketed sub-expressions); the predicates are AND-ed to its condition, values are
+  parameters named `@__f<n>` (renamed if `query_parameters` uses that prefix). The partition key
+  definition is read in `pushFilters` only when a filter references `pk`. The reader is pickled
+  after `pushFilters`, so executors get the query with the reader.
+
+Tests (`tests/test_pushdown.py`): query parsing; one test per translation rule; a property test
+with 80 documents per seed mixing JSON types, missing and null values, case variants, nested
+objects and strings that read like other values, and 25 random filter sets per seed (leaves,
+negations, `And`/`Or` trees, PERMISSIVE and DROPMALFORMED), comparing the pushed read plus Spark's
+re-check with Spark semantics on the full read; the fake evaluates WHERE clauses with the
+service's three-valued semantics (`tests/fake_query.py`). Dropping a type guard, marking guarded
+filters exact, a naive `NOT`, dropping `pk` candidates or the `IS NULL` result of system
+properties each fail between 2 and 21 of its tests. `tests/test_spark_local.py` compares results
+with the conf off and on through a local SparkSession (PySpark 4.0, 4.1, 4.2) and checks that an
+exact filter leaves Spark's plan; the integration test runs the property test against the
+endpoint (also run against an account: 60 filter sets agreed).
 
 ### EPK sub-splitting correctness
 
@@ -443,7 +503,8 @@ converted safely. See README for the conversion table.
 - End-to-end without a JVM (`tests/harness.py`): replays PySpark's call sequence (pickling the DataSource and reader, pickling partitions, JSON offsets, `setLatestSeenOffset`, admission-control calls, `records_to_arrow_batches` validation) against a **fake service** (`tests/fake_cosmos.py`). The fake uses real EPK hashing, per-partition LSN logs, LatestVersion/AVAD views, 304 positions, splits, replica lag and 429 injection.
 - CI matrix: Python 3.10 to 3.13 with PySpark 4.0, 4.1 and 4.2 (the 4.2-only admission-control tests are skipped on 4.0 and 4.1), plus the lowest (4.14.0) and the highest allowed azure-cosmos.
 - Databricks engine compatibility (`tests/test_databricks_engine_compat.py`): a foreign copy of `pyspark.sql.types` reproduces the engine `StructType`. A subprocess loads a fake `_engine_pyspark`, strips client PySpark to the 4.0 API, and replays the engine runner's admission-control protocol (signature check, `asdict` limit wire format, `reportLatestOffset`, AvailableNow mixin). Without `_compat.py`, 7 of its 10 tests fail.
-- Local Spark (`tests/test_spark_local.py`): batch and AvailableNow stream through a real local SparkSession against the fake; runs where Java 17+ is available, and CI fails if it is skipped.
+- Local Spark (`tests/test_spark_local.py`): batch and AvailableNow stream, and filter pushdown with the conf off and on, through a real local SparkSession against the fake; runs where Java 17+ is available, and CI fails if it is skipped.
+- Filter pushdown (`tests/test_pushdown.py`): see §4, "Filter pushdown".
 - Initial snapshot (`tests/test_initial_snapshot.py`): batch-0-only snapshot rows, call order (start probes before any snapshot page; offsets logged first), replay before and after the batch-0 commit, both PySpark call orders, admission control with and without a cap, AvailableNow (also through the engine-protocol simulation) including the target move after batch 0, offsets without the snapshot field, a split between P0 and planning and one during the query, an empty batch 0, row schema and values, session-token enforcement against a lagging replica, the delay, the property-style convergence test and its sabotage check. Planning the snapshot from the start offset's field instead of the end offset fails 18 tests; dropping the session token in `read()` fails 4.
 - Query splits and duplicates (`tests/test_query_splits.py`): see §4, "Splits and duplicates during a query".
 - Snapshot streams (`tests/test_snapshot_stream.py`): offset shape and validation, mode mix-ups, one complete snapshot per batch with one `snapshot_ts`, one snapshot per AvailableNow run, interval gating on both PySpark paths, replays keep `seq` and `snapshot_ts`, a clock going back, container re-creation, session tokens against a lagging replica, splits between and during snapshots, user schemas, and the Databricks engine protocol in a subprocess. Stamping rows at read time, dropping the AvailableNow budget, the `_rid` check, the monotonic stamp or the per-start cache each fail at least one test.

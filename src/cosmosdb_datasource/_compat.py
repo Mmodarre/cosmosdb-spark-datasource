@@ -143,6 +143,24 @@ def read_limit(max_rows: int | None) -> Any:
     return (cls or ReadAllAvailable)()
 
 
+# Spark's planner for reads with filter pushdown (``UserDefinedPythonDataSourceFilterPushdownRunner``),
+# under ``pyspark`` or the Databricks engine package. Spark only runs it while
+# spark.sql.python.filterPushdown.enabled is true; otherwise it plans with plan_data_source_read.
+PUSHDOWN_PLANNER_MODULE_SUFFIX = ".sql.worker.data_source_pushdown_filters"
+
+
+def filter_pushdown_planner() -> bool:
+    """Return True if the call comes from Spark's filter-pushdown planner (inspects the call stack)."""
+    frame = sys._getframe(1)
+    while frame is not None:
+        module = frame.f_globals
+        names = (module.get("__name__"), getattr(module.get("__spec__"), "name", None))
+        if any(isinstance(n, str) and n.endswith(PUSHDOWN_PLANNER_MODULE_SUFFIX) for n in names):
+            return True
+        frame = frame.f_back  # type: ignore[assignment]
+    return False
+
+
 def local_struct_type(schema: Any) -> StructType:
     """Return ``schema`` as a ``pyspark.sql.types.StructType`` of the PySpark imported here."""
     if isinstance(schema, StructType):

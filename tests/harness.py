@@ -39,9 +39,25 @@ def validate_rows(rows: list[tuple], schema: StructType, ds: CosmosDBDataSource)
 
 
 def run_batch(options: dict[str, str], schema: StructType | None = None) -> tuple[list[tuple], list[Any]]:
+    rows, parts, _remaining = run_batch_with_filters(options, schema, None)
+    return rows, parts
+
+
+def run_batch_with_filters(
+    options: dict[str, str], schema: StructType | None, filters: list[Any] | None
+) -> tuple[list[tuple], list[Any], list[Any]]:
+    """Like ``run_batch``; with ``filters``, call ``pushFilters`` first, as ``data_source_pushdown_filters`` does.
+
+    Returns the rows, the partitions and the filters the reader left to Spark (checked to be input
+    filters by reference, as Spark requires).
+    """
     ds = make_source(options)
     schema = schema or ds.schema()
     reader = ds.reader(schema)
+    remaining: list[Any] = []
+    if filters is not None:
+        remaining = list(reader.pushFilters(list(filters)))
+        assert all(any(r is f for f in filters) for r in remaining), "pushFilters returned a filter it was not given"
     shipped = cloudpickle.dumps(reader)
     parts = reader.partitions()
     assert isinstance(parts, list)
@@ -51,7 +67,7 @@ def run_batch(options: dict[str, str], schema: StructType | None = None) -> tupl
         out = list(executor_reader.read(pickle.loads(pickle.dumps(part))))
         validate_rows(out, schema, ds)
         rows.extend(out)
-    return rows, parts
+    return rows, parts, remaining
 
 
 class StreamHarness:
