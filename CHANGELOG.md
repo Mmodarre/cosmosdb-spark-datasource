@@ -10,6 +10,10 @@ First public release.
 
 ### Added
 
+- Schema inference for batch reads (`infer_schema=true`): up to `sampling_size` (1000) documents of
+  `sampling_query` (default: `query`), spread over the physical partitions, give typed columns.
+  Types merge to the tightest common type (else STRING); `infer_system_properties` and
+  `infer_timestamp` add system properties and `_ts`.
 - Filter pushdown for batch reads (`filter_pushdown=true` or `auto`, PySpark 4.1+ with
   `spark.sql.python.filterPushdown.enabled=true`): comparisons, `IN`, `IS NULL` and `LIKE`
   prefix, suffix and substring filters become parameterized `WHERE` predicates of the query. Spark

@@ -33,6 +33,10 @@ class CosmosDBDataSource(DataSource):
         # Spark gives schema() no batch/stream signal, so snapshot_stream selects the snapshot-stream
         # schema and change-feed options select the change-feed schema (see README "Schemas").
         raw = self._opts.raw_json_column
+        if self._opts.infer_schema:
+            from cosmosdb_datasource.inference import infer_schema_from_container
+
+            return infer_schema_from_container(self._opts)
         if self._opts.snapshot_stream:
             return snapshot_stream_schema(raw)
         if self._opts.stream_options_present:

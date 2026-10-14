@@ -348,6 +348,17 @@ def test_filter_pushdown_returns_what_spark_filtering_returns(make_container) ->
     assert reduced > 10
 
 
+def test_inferred_schema(seeded) -> None:
+    name, _container, n = seeded
+    ds = make_source(options(name, infer_schema="true", sampling_size=100))
+    schema = ds.schema()
+    assert schema.simpleString() == (
+        "struct<id:string,pk:string,seq:bigint,createdAt:string,tags:array<string>,nested:struct<x:bigint>>"
+    )
+    rows, _ = run_batch(options(name, infer_schema="true", sampling_size=100), schema)
+    assert len(rows) == n and all(r[2] == r[5][0] for r in rows)
+
+
 @requires("requires_epk_ranges")
 def test_batch_epk_sub_split_hash_v1(make_container) -> None:
     name, container = make_container(version=1)
