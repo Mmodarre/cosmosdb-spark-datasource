@@ -1,26 +1,26 @@
-"""Integration tests against Azure Cosmos DB for NoSQL or the Linux (vNext) emulator.
+"""Integration tests against Azure Cosmos DB for NoSQL or a Cosmos DB emulator.
 
 Configuration, from the environment:
 
 ``COSMOS_ENDPOINT``, ``COSMOS_KEY``
-    Account endpoint and key. Required; every test is skipped without them. The emulator does not
-    check the key, but the SDK signs requests with it, so it must be base64.
+    Account endpoint and key. Required; every test is skipped without them.
 ``COSMOS_DATABASE``
     Database for the test containers, created if missing (default ``cosmosdb_datasource_it``).
-``COSMOS_EMULATOR=1``
-    The endpoint is the emulator: tests that need a capability it lacks are skipped (see
-    ``EMULATOR_UNSUPPORTED``).
+``COSMOS_EMULATOR``
+    ``vnext`` or ``legacy`` when the endpoint is that emulator: tests that need a capability it
+    lacks are skipped (see ``EMULATOR_UNSUPPORTED``).
 ``COSMOS_UNSUPPORTED``
-    Comma-separated capability markers to skip on an account, e.g. ``requires_avad`` when
-    the account has no AllVersionsAndDeletes change feed.
-``COSMOS_MULTI_PARTITION_CONTAINER``
-    An existing container in ``COSMOS_DATABASE`` with more than one physical partition (read only).
+    Comma-separated capability markers to skip, e.g. ``requires_avad`` for an account without the
+    AllVersionsAndDeletes change feed.
+``COSMOS_MULTI_PARTITION_THROUGHPUT``
+    RU/s for the containers of the ``requires_multi_partition`` tests; it must yield more than one
+    physical partition (e.g. 20000 on the legacy emulator, at least 12000 on an account).
 ``COSMOS_AAD=1``
     Also run the ``auth_type=default`` test. ``DefaultAzureCredential`` must find an identity with a
     Cosmos DB data-plane role on the account.
 
-Tests write only to containers they create (``it_<random>``) and delete them afterwards. Containers
-are created without explicit throughput, so serverless accounts work too.
+Tests write only to containers they create (``it_<random>``) and delete them afterwards. Other
+containers are created without explicit throughput, so serverless accounts work too.
 """
 
 from __future__ import annotations
@@ -49,10 +49,9 @@ from tests.harness import StreamHarness, make_source, run_batch, validate_rows
 ENDPOINT = os.environ.get("COSMOS_ENDPOINT", "")
 KEY = os.environ.get("COSMOS_KEY", "")
 DATABASE = os.environ.get("COSMOS_DATABASE") or "cosmosdb_datasource_it"
-EMULATOR = os.environ.get("COSMOS_EMULATOR") == "1"
-MULTI_PARTITION_CONTAINER = os.environ.get("COSMOS_MULTI_PARTITION_CONTAINER", "")
+EMULATOR = os.environ.get("COSMOS_EMULATOR", "")
+MULTI_PARTITION_THROUGHPUT = int(os.environ.get("COSMOS_MULTI_PARTITION_THROUGHPUT") or 0)
 AAD = os.environ.get("COSMOS_AAD") == "1"
-
 UNSUPPORTED = {s.strip() for s in os.environ.get("COSMOS_UNSUPPORTED", "").split(",") if s.strip()}
 
 CAPABILITIES = {
@@ -62,11 +61,18 @@ CAPABILITIES = {
     "requires_session_tokens": "session token enforcement",
     "requires_aad": "Entra ID authentication",
 }
-# The vNext emulator lacks all of them (observed with image version EN20261008):
-# AllVersionsAndDeletes requests return LatestVersion items, EPK sub-range filters are ignored,
-# every container has one physical partition, session tokens are not enforced and requests are
-# not authenticated.
-EMULATOR_UNSUPPORTED = frozenset(CAPABILITIES)
+# Observed on GitHub's ubuntu-24.04 runners with azure-cosmos 4.17.1.
+EMULATOR_UNSUPPORTED = {
+    # Linux vNext emulator, vnext-EN20261008: AllVersionsAndDeletes requests return LatestVersion
+    # items, EPK sub-range filters are ignored, every container has one physical partition, session
+    # tokens are not enforced and requests are not authenticated.
+    "vnext": frozenset(CAPABILITIES),
+    # Legacy Linux emulator, 2.14.28 (x64 only): AllVersionsAndDeletes is rejected with HTTP 400
+    # ("must be enabled"), and only key authentication exists.
+    "legacy": frozenset({"requires_avad", "requires_aad"}),
+}
+if EMULATOR and EMULATOR not in EMULATOR_UNSUPPORTED:
+    raise ValueError(f"COSMOS_EMULATOR must be one of {', '.join(EMULATOR_UNSUPPORTED)}, got {EMULATOR!r}")
 
 pytestmark = [
     pytest.mark.integration,
@@ -77,18 +83,35 @@ if EMULATOR:
     pytestmark.append(pytest.mark.filterwarnings("ignore::urllib3.exceptions.InsecureRequestWarning"))
 
 
-@pytest.fixture(autouse=True)
-def _capabilities(request: pytest.FixtureRequest) -> None:
-    names = {m.name for m in request.node.iter_markers()}
-    if EMULATOR and names & EMULATOR_UNSUPPORTED:
-        missing = ", ".join(sorted(CAPABILITIES[n] for n in names & EMULATOR_UNSUPPORTED))
-        pytest.skip(f"the emulator does not support: {missing}")
+def _skip_reason(names: set[str]) -> str | None:
+    lacking = names & EMULATOR_UNSUPPORTED.get(EMULATOR, frozenset())
+    if lacking:
+        return f"the {EMULATOR} emulator does not support: {', '.join(sorted(CAPABILITIES[n] for n in lacking))}"
     if names & UNSUPPORTED:
-        pytest.skip(f"disabled by COSMOS_UNSUPPORTED: {', '.join(sorted(names & UNSUPPORTED))}")
-    if "requires_multi_partition" in names and not MULTI_PARTITION_CONTAINER:
-        pytest.skip("COSMOS_MULTI_PARTITION_CONTAINER is not set")
+        return f"disabled by COSMOS_UNSUPPORTED: {', '.join(sorted(names & UNSUPPORTED))}"
+    if "requires_multi_partition" in names and not MULTI_PARTITION_THROUGHPUT:
+        return "COSMOS_MULTI_PARTITION_THROUGHPUT is not set"
     if "requires_aad" in names and not AAD:
-        pytest.skip("COSMOS_AAD is not set")
+        return "COSMOS_AAD is not set"
+    return None
+
+
+def requires(*names: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Apply the capability markers ``names`` and skip the test where a capability is missing.
+
+    A ``skipif`` mark (not a fixture) so that module-scoped fixtures are not set up for skipped tests.
+    """
+    unknown = set(names) - CAPABILITIES.keys()
+    if unknown:
+        raise ValueError(f"unknown capability markers: {sorted(unknown)}")
+    reason = _skip_reason(set(names))
+
+    def decorate(test: Callable[..., Any]) -> Callable[..., Any]:
+        for name in names:
+            test = getattr(pytest.mark, name)(test)
+        return pytest.mark.skipif(reason is not None, reason=reason or "")(test)
+
+    return decorate
 
 
 @pytest.fixture(scope="session")
@@ -101,7 +124,7 @@ def sdk_db() -> Iterator[Any]:
 
 
 @contextlib.contextmanager
-def temporary_container(db: Any, *, version: int = 2) -> Iterator[tuple[str, Any]]:
+def temporary_container(db: Any, *, version: int = 2, throughput: int | None = None) -> Iterator[tuple[str, Any]]:
     from azure.cosmos import PartitionKey
     from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
@@ -112,7 +135,9 @@ def temporary_container(db: Any, *, version: int = 2) -> Iterator[tuple[str, Any
             try:
                 # Idempotent: a client-side timeout may still have created the container.
                 container = db.create_container_if_not_exists(
-                    name, partition_key=PartitionKey(path="/pk", kind="Hash", version=version)
+                    name,
+                    partition_key=PartitionKey(path="/pk", kind="Hash", version=version),
+                    **({"offer_throughput": throughput} if throughput else {}),
                 )
                 break
             except Exception:
@@ -255,7 +280,7 @@ def test_batch_auto_partitioning(seeded) -> None:
     assert len(rows) == n
 
 
-@pytest.mark.requires_epk_ranges
+@requires("requires_epk_ranges")
 def test_batch_epk_sub_split_hash_v1(make_container) -> None:
     name, container = make_container(version=1)
     seed(container, 2000, keys=200)
@@ -267,22 +292,35 @@ def test_batch_epk_sub_split_hash_v1(make_container) -> None:
     assert all(abs(s - mean) / mean < 0.5 for s in sizes), f"unbalanced V1 sub-split: {sizes}"
 
 
-@pytest.mark.requires_multi_partition
-def test_batch_multi_partition_container(sdk_db) -> None:
-    container = sdk_db.get_container_client(MULTI_PARTITION_CONTAINER)
-    ranges = feed_range_count(container)
-    assert ranges > 1, f"{MULTI_PARTITION_CONTAINER} has a single physical partition"
-    before = count(container)
-    rows, parts, _sizes = parallel_batch(options(MULTI_PARTITION_CONTAINER, query="SELECT c.id FROM c", page_size=5000))
-    assert len(parts) == ranges
-    keys = [(r[1], r[0]) for r in rows]
-    assert len(keys) == len(set(keys))
-    if count(container) != before:
-        pytest.skip(f"{MULTI_PARTITION_CONTAINER} changed during the read; exact count not checkable")
-    assert len(keys) == before
+@pytest.fixture(scope="module")
+def multi_partition(sdk_db: Any) -> Iterator[tuple[str, Any, int]]:
+    """Container with several physical partitions and 2000 documents."""
+    with temporary_container(sdk_db, throughput=MULTI_PARTITION_THROUGHPUT) as (name, container):
+        ranges = feed_range_count(container)
+        assert ranges > 1, f"{MULTI_PARTITION_THROUGHPUT} RU/s gave a single physical partition"
+        seed(container, 2000, keys=200)
+        yield name, container, ranges
 
 
-@pytest.mark.requires_aad
+@requires("requires_multi_partition")
+def test_batch_multi_partition(multi_partition) -> None:
+    name, _container, ranges = multi_partition
+    rows, parts, sizes = parallel_batch(options(name))
+    assert len(parts) == ranges and all(sizes)
+    ids = [r[0] for r in rows]
+    assert len(ids) == len(set(ids)) == 2000
+
+
+@requires("requires_multi_partition", "requires_epk_ranges")
+def test_batch_multi_partition_sub_split(multi_partition) -> None:
+    name, _container, ranges = multi_partition
+    rows, parts, _sizes = parallel_batch(options(name, partitions_per_feed_range=3))
+    assert len(parts) == 3 * ranges
+    ids = [r[0] for r in rows]
+    assert len(ids) == len(set(ids)) == 2000
+
+
+@requires("requires_aad")
 def test_batch_default_credential(seeded) -> None:
     pytest.importorskip("azure.identity")
     name, _container, n = seeded
@@ -338,7 +376,7 @@ def test_stream_max_items_per_trigger(make_container) -> None:
     assert sorted(h.column(rows, "id")) == sorted(f"d{i}" for i in range(150))
 
 
-@pytest.mark.requires_epk_ranges
+@requires("requires_epk_ranges")
 def test_stream_epk_sub_split(make_container) -> None:
     name, container = make_container()
     write(container, 0, 150)
@@ -350,7 +388,25 @@ def test_stream_epk_sub_split(make_container) -> None:
     assert len(set(split.column(all_split, "id"))) == len(all_split) == 150
 
 
-@pytest.mark.requires_avad
+@requires("requires_multi_partition")
+def test_stream_multi_partition(make_container) -> None:
+    name, container = make_container(throughput=MULTI_PARTITION_THROUGHPUT)
+    ranges = feed_range_count(container)
+    assert ranges > 1
+    seed(container, 1000, keys=200)
+    h = StreamHarness(options(name, change_feed_mode="LatestVersion", max_items_per_trigger=50))
+    start = json.loads(h.start())
+    assert len(start["ranges"]) == ranges
+    rows = h.run_until_idle()
+    assert len(h.batches) > 1
+    assert sorted(h.column(rows, "id")) == sorted(f"d{i}" for i in range(1000))
+    assert len(set(h.column(rows, "feed_range"))) == ranges
+    h.restart()
+    write(container, 5000, 40, keys=200)
+    assert sorted(h.column(h.run_until_idle(), "id")) == sorted(f"d{i}" for i in range(5000, 5040))
+
+
+@requires("requires_avad")
 def test_stream_all_versions_and_deletes(make_container) -> None:
     name, container = make_container()
     h = StreamHarness(options(name, change_feed_mode="AllVersionsAndDeletes", page_size=10))
@@ -455,9 +511,7 @@ def test_initial_snapshot_latest_version_converges(make_container) -> None:
     assert _merge_latest(rows) == _container_state(container)
 
 
-@pytest.mark.requires_avad
-@pytest.mark.requires_epk_ranges
-@pytest.mark.requires_session_tokens
+@requires("requires_avad", "requires_epk_ranges", "requires_session_tokens")
 def test_initial_snapshot_all_versions_with_concurrent_writes_converges(make_container) -> None:
     """AVAD with initial_snapshot: batch 0 is read while another thread inserts, updates and deletes.
 
