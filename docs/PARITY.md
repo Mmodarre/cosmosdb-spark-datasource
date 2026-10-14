@@ -18,9 +18,9 @@ source).
 
 | Status | Rows |
 |---|---|
-| Supported | 21 |
-| Partially | 11 |
-| Missing | 9 |
+| Supported | 23 |
+| Partially | 10 |
+| Missing | 8 |
 | N/A | 4 |
 | Not verified | 1 |
 
@@ -49,8 +49,8 @@ source).
 | One task per physical partition | `spark.cosmos.read.partitioning.strategy=Default` / `Restrictive` | **Supported**: `partitions_per_feed_range=1` (default) | The fastest setting for both in the benchmark. |
 | Storage-aligned split | `Aggressive` (about 5 GiB per partition, at least `1 + 2 x defaultParallelism`) | **Partially**: `partitions_per_feed_range=N`; `auto` reads one task per physical partition | An EPK sub-range query scans its whole physical partition, in both libraries (connector `Aggressive`: 3.4x the RU), so splitting only pays when the client, not the service, limits a partition. |
 | Targeted partition count | `Custom`, `spark.cosmos.partitioning.targetedCount` | **Partially**: `partitions_per_feed_range=N` per feed range | |
-| Logical-partition scoping | `spark.cosmos.partitioning.feedRangeFilter`; UDFs `GetFeedRangeForPartitionKeyValue`, `GetFeedRangeForHierarchicalPartitionKeyValues`, `GetOverlappingFeedRange` | **Partially**: a partition-key filter in `query` (or a pushed `pk` filter) | Every feed range still gets a task. |
-| readMany / point reads | `spark.cosmos.read.readManyFiltering.enabled`, `_itemIdentity`, UDF `GetCosmosItemIdentityValue`; `readManyByPartitionKeys` | **Missing** | |
+| Logical-partition scoping | `spark.cosmos.partitioning.feedRangeFilter`; UDFs `GetFeedRangeForPartitionKeyValue`, `GetFeedRangeForHierarchicalPartitionKeyValues`, `GetOverlappingFeedRange` | **Supported**: `partition_key` (a key or a hierarchical prefix), and pushed `pk = 'v'` / `pk IN (...)` | One task, routed by partition key: 4.3 RU for a 50-document partition; an EPK-range query for the same key scans its physical partition (2,386 RU). |
+| readMany / point reads | `spark.cosmos.read.readManyFiltering.enabled`, `_itemIdentity`, UDF `GetCosmosItemIdentityValue`; `readManyByPartitionKeys` | **Supported**: `item_ids` option; `read_many(identities, ...)` for a DataFrame of `(id, pk)` | Through `read_items`: 1,000 items for 301 RU. No `_itemIdentity` column; `readManyByPartitionKeys` maps to `partition_key`. |
 | Runtime filtering | `spark.cosmos.read.runtimeFiltering.enabled` | **N/A** | No runtime-filter hook in the Python API. |
 | Integrated cache | `spark.cosmos.read.maxIntegratedCacheStalenessInMS` | **Missing** | |
 | Page size | `spark.cosmos.read.maxItemCount` (1000) | **Supported**: `page_size` (5000) | Both libraries read fastest with 5,000-item pages in the benchmark. |

@@ -359,6 +359,33 @@ def test_inferred_schema(seeded) -> None:
     assert len(rows) == n and all(r[2] == r[5][0] for r in rows)
 
 
+def test_partition_key_item_ids_and_read_many_function(seeded) -> None:
+    import pyarrow as pa
+
+    from cosmosdb_datasource import readmany
+
+    name, _container, n = seeded
+    rows, parts = run_batch(options(name, partition_key="p3"))
+    assert len(parts) == 1 and sorted(r[0] for r in rows) == sorted(f"d{i}" for i in range(n) if i % 20 == 3)
+    ids = [[f"d{i}", f"p{i % 20}"] for i in range(0, n, 7)] + [["missing", "p1"]]
+    rows, _ = run_batch(options(name, item_ids=json.dumps(ids)))
+    assert sorted(r[0] for r in rows) == sorted(f"d{i}" for i in range(0, n, 7))
+
+    class Frame:
+        def __getitem__(self, column: str) -> str:
+            return column
+
+        def select(self, *columns: str) -> Any:
+            return self
+
+        def mapInArrow(self, fn: Any, schema: Any) -> Any:
+            return fn
+
+    read = readmany.read_many(Frame(), schema=StructType([StructField("id", StringType())]), **options(name))
+    batch = pa.RecordBatch.from_pydict({"id": ["d5", "d6", "nope"], "pk": ["p5", "p6", "p1"]})
+    assert sorted(pa.Table.from_batches(list(read(iter([batch])))).column("id").to_pylist()) == ["d5", "d6"]
+
+
 @requires("requires_epk_ranges")
 def test_batch_epk_sub_split_hash_v1(make_container) -> None:
     name, container = make_container(version=1)

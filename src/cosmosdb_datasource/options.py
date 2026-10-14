@@ -133,6 +133,8 @@ KNOWN_OPTIONS = frozenset(
         "filter_pushdown",
         "prefetch_pages",
         "arrow_batches",
+        "partition_key",
+        "item_ids",
         "infer_schema",
         "sampling_size",
         "sampling_query",
@@ -280,6 +282,8 @@ class CosmosOptions:
     snapshot_interval_seconds: float = 0.0
     filter_pushdown: str = "false"  # "false" | "true" | "auto"
     prefetch_pages: int = 1
+    partition_key: str | None = None  # JSON of one logical partition key (or a hierarchical prefix)
+    item_ids: tuple[tuple[str, str], ...] = ()  # (id, partition key as JSON)
     arrow_batches: str = AUTO  # "auto" | "true" | "false"
     infer_schema: bool = False
     sampling_size: int = DEFAULT_SAMPLING_SIZE
@@ -415,6 +419,47 @@ def _parse_partitions_per_feed_range(raw: str | None) -> int | str:
     return value
 
 
+def _parse_partition_key(raw: str | None) -> str | None:
+    """Return the key as JSON: the option's JSON value, or the option text itself as a string key."""
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        value = raw
+    if isinstance(value, dict) or (isinstance(value, list) and not all(not isinstance(v, (dict, list)) for v in value)):
+        raise CosmosConfigError(
+            "Option 'partition_key' must be a partition key value: a string, number, boolean, null, or a JSON "
+            f"array of those for a hierarchical key, got {raw!r}."
+        )
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _parse_item_ids(raw: str | None) -> tuple[tuple[str, str], ...]:
+    if raw is None:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        raise CosmosConfigError(f'Option \'item_ids\' must be a JSON list like [["id1", "pk1"]]: {exc}') from None
+    if not isinstance(parsed, list) or not parsed:
+        raise CosmosConfigError(
+            'Option \'item_ids\' must be a non-empty JSON list of ["id", pk] pairs or {"id", "pk"} objects.'
+        )
+    out = []
+    for i, item in enumerate(parsed):
+        if isinstance(item, dict) and set(item) == {"id", "pk"}:
+            item_id, key = item["id"], item["pk"]
+        elif isinstance(item, list) and len(item) == 2:
+            item_id, key = item
+        else:
+            raise CosmosConfigError(f'item_ids[{i}] must be ["id", pk] or {{"id": ..., "pk": ...}}, got {item!r}.')
+        if not isinstance(item_id, str) or not item_id:
+            raise CosmosConfigError(f"item_ids[{i}]: the id must be a non-empty string, got {item_id!r}.")
+        out.append((item_id, json.dumps(key, ensure_ascii=False, separators=(",", ":"))))
+    return tuple(out)
+
+
 def _prefetch_pages(opts: dict[str, str]) -> int:
     value = _int(opts, "prefetch_pages", 1, minimum=0)
     assert value is not None
@@ -541,6 +586,21 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
         if stray:
             raise CosmosConfigError(f"Option(s) {', '.join(stray)} only apply with infer_schema=true.")
 
+    partition_key = _parse_partition_key(_get(opts, "partition_key"))
+    item_ids = _parse_item_ids(_get(opts, "item_ids"))
+    if partition_key is not None or item_ids:
+        given = [n for n in ("partition_key", "item_ids") if _get(opts, n) is not None]
+        streaming = [
+            *(n for n in STREAM_ONLY_OPTIONS if _get(opts, n) is not None),
+            *(["snapshot_stream"] if snapshot_stream else []),
+        ]
+        if len(given) > 1:
+            raise CosmosConfigError("Options 'partition_key' and 'item_ids' cannot be combined.")
+        if streaming:
+            raise CosmosConfigError(f"Option '{given[0]}' applies to batch reads, not with {', '.join(streaming)}.")
+        if item_ids and _get(opts, "query") is not None:
+            raise CosmosConfigError("Option 'item_ids' reads documents by id; remove 'query'.")
+
     query = _get(opts, "query")
     raw_column = _get(opts, "raw_json_column", DEFAULT_RAW_COLUMN) or DEFAULT_RAW_COLUMN
     corrupt_column = _get(opts, "corrupt_record_column", DEFAULT_CORRUPT_COLUMN) or DEFAULT_CORRUPT_COLUMN
@@ -589,6 +649,8 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
         snapshot_interval_seconds=_float(opts, "snapshot_interval_seconds", 0.0, minimum=0.0),
         filter_pushdown=_parse_filter_pushdown(_get(opts, "filter_pushdown")),
         prefetch_pages=_prefetch_pages(opts),
+        partition_key=partition_key,
+        item_ids=item_ids,
         arrow_batches=_parse_tristate(opts, "arrow_batches", AUTO),
         infer_schema=infer,
         sampling_size=_int(opts, "sampling_size", DEFAULT_SAMPLING_SIZE, minimum=1),  # type: ignore[arg-type]

@@ -164,3 +164,10 @@ def test_inferred_schema(spark) -> None:
     df = spark.read.format("cosmosdb").options(**fake_options(store, infer_schema="true", sampling_size="50")).load()
     assert df.schema.simpleString() == "struct<id:string,pk:string,v:bigint,nested:struct<x:bigint>>"
     assert df.filter("nested.x = v").count() == 200
+
+
+def test_partition_key(spark) -> None:
+    store = _store("spark_partition_key", docs=200)
+    scoped = spark.read.format("cosmosdb").options(**fake_options(store, partition_key="p1")).load()
+    assert scoped.rdd.getNumPartitions() == 1
+    assert sorted(r.id for r in scoped.collect()) == sorted(f"d{i}" for i in range(200) if i % 31 == 1)

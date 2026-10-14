@@ -427,6 +427,52 @@ class FakeBackend:
             if done:
                 return
 
+    def query_partition_pages(
+        self, query, parameters, partition_key, page_size, continuation=None
+    ) -> Iterator[QueryPage]:
+        """Serve the documents of one logical partition (or of a prefix of a hierarchical key), by ``_rid``."""
+        matches = compile_query(query, parameters)
+        after = json.loads(continuation)["rid"] if continuation else 0
+        prefix = isinstance(partition_key, list) and len(partition_key) < len(self.store.pk_def["paths"])
+        while True:
+            store = self._request("query_partition_pages")
+            with _LOCK:
+                docs = []
+                for part in store.partitions:
+                    latest: dict[tuple[str, str], Version] = {}
+                    for v in part.log:
+                        latest[(json.dumps(v.pk), v.id)] = v
+                    for v in latest.values():
+                        key_matches = v.pk[: len(partition_key)] == partition_key if prefix else v.pk == partition_key
+                        if v.op != "delete" and key_matches and v.rid > after and matches(v.doc or {}):
+                            docs.append(v)
+                docs.sort(key=lambda v: v.rid)
+                page, more = docs[:page_size], len(docs) > page_size
+                store.call_log.append(["partition_query_page", json.dumps(partition_key), len(page)])
+            if page:
+                after = page[-1].rid
+            token = json.dumps({"rid": after}) if more else None
+            yield QueryPage([dict(v.doc) for v in page], token, request_charge=1.0, partitions=("0",))
+            if not more:
+                return
+
+    def read_items(self, items) -> tuple[list[dict[str, Any]], float]:
+        store = self._request("read_items")
+        wanted = {(item_id, json.dumps(key)) for item_id, key in items}
+        found = []
+        for doc in store.live_documents():
+            if (doc["id"], json.dumps(store._pk_info.extract(doc))) in wanted:
+                found.append(dict(doc))
+        store.log_call("read_items", len(items), len(found))
+        return found, float(len(items))
+
+    def key_epk(self, partition_key) -> str:
+        return self.store._epk(partition_key)
+
+    def key_range(self, partition_key) -> tuple[str, str]:
+        rng = self.store._pk._get_epk_range_for_partition_key(partition_key)
+        return rng.min.upper(), rng.max.upper()
+
     def _entries(
         self, store: FakeCosmosStore, part: Partition, lo: str, hi: str, after: int, mode: str, visible: int
     ) -> list[Version]:

@@ -126,14 +126,47 @@ class SdkBackend:
         service serve every page from a replica that has applied at least that session's writes;
         otherwise it answers 404/1002, which the SDK and :mod:`cosmosdb_datasource.retry` retry.
         """
-        pages = self._query_pages(query, parameters, rng, page_size, continuation, session_token)
-        return prefetched(pages, self._prefetch_pages)
+        scope = {"feed_range": feed_range_dict(*rng)}
+        return prefetched(
+            self._query_pages(query, parameters, scope, page_size, continuation, session_token), self._prefetch_pages
+        )
+
+    def query_partition_pages(
+        self,
+        query: str,
+        parameters: list[dict[str, Any]] | None,
+        partition_key: Any,
+        page_size: int,
+        continuation: str | None = None,
+    ) -> Iterator[QueryPage]:
+        """Yield the query pages of one logical partition (routed by partition key, not by EPK range)."""
+        scope = {"partition_key": partition_key}
+        return prefetched(
+            self._query_pages(query, parameters, scope, page_size, continuation, None), self._prefetch_pages
+        )
+
+    def read_items(self, items: list[tuple[str, Any]]) -> tuple[list[dict[str, Any]], float]:
+        """Return the existing documents among ``(id, partition key)`` pairs, and the request charge."""
+        charges: list[float] = []
+        docs = self._container.read_items(
+            items=items, response_hook=lambda headers, _body: charges.append(_charge(headers)), **self._kwargs()
+        )
+        return [dict(d) for d in docs], sum(charges)
+
+    def key_epk(self, partition_key: Any) -> str:
+        """Return the effective partition key of a (full) partition key value."""
+        return self.key_range(partition_key)[0]
+
+    def key_range(self, partition_key: Any) -> tuple[str, str]:
+        """Return the EPK range of a partition key value or of a prefix of a hierarchical key."""
+        rng = self._container.feed_range_from_partition_key(partition_key)["Range"]
+        return str(rng["min"]).upper(), str(rng["max"]).upper()
 
     def _query_pages(
         self,
         query: str,
         parameters: list[dict[str, Any]] | None,
-        rng: tuple[str, str],
+        scope: dict[str, Any],
         page_size: int,
         continuation: str | None,
         session_token: str | None,
@@ -155,11 +188,7 @@ class SdkBackend:
         if session_token:
             kwargs["session_token"] = session_token
         pager = self._container.query_items(
-            query=query,
-            feed_range=feed_range_dict(*rng),
-            max_item_count=page_size,
-            response_hook=hook,
-            **kwargs,
+            query=query, max_item_count=page_size, response_hook=hook, **scope, **kwargs
         )
         pages = pager.by_page(continuation_token=continuation) if continuation else pager.by_page()
         for page in pages:

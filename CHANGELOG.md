@@ -10,6 +10,10 @@ First public release.
 
 ### Added
 
+- Logical-partition and point reads: `partition_key` reads one logical partition (or a prefix of
+  a hierarchical key) as one task routed by partition key, `item_ids` and `read_many(identities)`
+  read given documents with `read_items`, and pushed `pk = 'v'` / `pk IN (...)` filters read only
+  those logical partitions.
 - Faster batch reads: query pages are fetched one page ahead of the conversion (`prefetch_pages`,
   default 1), rows reach Spark as Arrow record batches (`arrow_batches`, default `auto`), and row
   conversion and the encoding of `body` take fewer calls. A client-bound read of 1M documents on
