@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover - exercised on PySpark 4.0/4.1
     ReadAllAvailable = ReadMaxRows = None
 from pyspark.sql.types import LongType, StringType, StructField, StructType
 
-from cosmosdb_datasource import _base, retry
+from cosmosdb_datasource import retry
 from cosmosdb_datasource import stream as stream_module
 from cosmosdb_datasource.errors import CosmosConfigError
 from cosmosdb_datasource.offsets import Offset, SnapshotState
@@ -471,7 +471,7 @@ def test_without_admission_control_the_first_available_now_run_ends_after_the_sn
     assert ids(h, h.run_batch()) == sorted(f"d{i}" for i in range(10, 13))
 
 
-def test_snapshot_partitions_follow_partitions_per_feed_range(make_store, monkeypatch) -> None:
+def test_snapshot_partitions_follow_partitions_per_feed_range(make_store) -> None:
     store = make_store(partitions=2)
     load(store, 300, payload="x" * 400)
     h = snap(store, partitions_per_feed_range=3)
@@ -481,12 +481,11 @@ def test_snapshot_partitions_follow_partitions_per_feed_range(make_store, monkey
     rows = h.read_range(start, end)
     assert len(rows) == len(set(h.column(rows, "id"))) == 300
 
-    monkeypatch.setattr(_base, "AUTO_TARGET_BYTES_PER_PARTITION", 40 * 1024)
     auto = snap(store, partitions_per_feed_range="auto")
     start, end = auto.start(), auto.latest()
     snapshot_parts = auto.planner.partitions(json.loads(start), json.loads(end))
     _rows, batch_parts = run_batch(fake_options(store, partitions_per_feed_range="auto"))
-    assert len(snapshot_parts) == len(batch_parts) > 2  # sized from the container, like a batch read
+    assert len(snapshot_parts) == len(batch_parts) == 2  # one task per physical partition, like a batch read
     auto.planner.commit(json.loads(end))
     auto.committed = end
     load(store, 10, start=300)

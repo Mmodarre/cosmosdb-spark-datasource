@@ -386,7 +386,7 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         # Current physical partitions, like a batch read: they tile the key space whether or not a
         # partition was split since the start was resolved.
         ranges = self._feed_ranges(backend)
-        splits = self._splits_per_range(backend, len(ranges))
+        splits = self._splits_per_range()
         parts = [
             CosmosSnapshotPartition(i, lo, hi, epk.range_key(*feed), pk, token, snapshot.session_token_for(*feed))
             for i, (feed, (lo, hi)) in enumerate(split_feed_ranges(ranges, splits, pk))

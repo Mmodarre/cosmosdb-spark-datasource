@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections
 import json
+import logging
 import time
 from datetime import datetime, timezone
 
@@ -48,13 +49,22 @@ def test_batch_hash_v1_container(make_store) -> None:
     assert len(sizes) == 12
 
 
-def test_batch_auto_partitioning_uses_container_size(make_store, monkeypatch: pytest.MonkeyPatch) -> None:
-    store = make_store(partitions=2)
-    load(store, 400, payload="x" * 500)
-    monkeypatch.setattr(_base, "AUTO_TARGET_BYTES_PER_PARTITION", 40 * 1024)
+def test_auto_reads_each_physical_partition_as_one_task(make_store, caplog) -> None:
+    store = make_store(partitions=3)
+    load(store, 400, payload="x" * 5000)
     rows, parts = run_batch(fake_options(store, partitions_per_feed_range="auto"))
-    assert len(parts) > 2 and len(parts) % 2 == 0
-    assert len({r[0] for r in rows}) == 400
+    assert len(parts) == 3 and len({r[0] for r in rows}) == 400
+
+
+def test_sub_splitting_warns_about_the_ru_cost_once(make_store, caplog, monkeypatch) -> None:
+    monkeypatch.setattr(_base, "_warned_sub_split", False)
+    store = make_store(partitions=1)
+    load(store, 20)
+    with caplog.at_level(logging.WARNING, logger="cosmosdb_datasource"):
+        run_batch(fake_options(store, partitions_per_feed_range=4))
+        run_batch(fake_options(store, partitions_per_feed_range=4))
+    warnings = [r for r in caplog.records if "times the RU" in r.getMessage()]
+    assert len(warnings) == 1 and "about 4 times" in warnings[0].getMessage()
 
 
 def test_batch_empty_container(make_store) -> None:

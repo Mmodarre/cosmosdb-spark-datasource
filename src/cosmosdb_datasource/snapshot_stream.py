@@ -183,7 +183,7 @@ class CosmosSnapshotStreamReader(CosmosReaderBase, DataSourceStreamReader, _Avai
         pk = PartitionKeyInfo.from_container_properties(props)
         ranges = self._driver_call("reading feed ranges", lambda: backend.feed_ranges(force_refresh=True))
         sessions = self._session_tokens(backend, ranges)
-        splits = self._splits_per_range(backend, len(ranges))
+        splits = self._splits_per_range()
         parts = [
             CosmosSnapshotStreamPartition(
                 i, lo, hi, epk.range_key(*feed), pk, token, sessions.get(feed), end_offset.snapshot_ts

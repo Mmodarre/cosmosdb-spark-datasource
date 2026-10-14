@@ -62,7 +62,7 @@ variables:
     default: none
 
   partitions_per_feed_range:
-    description: EPK sub-splits per physical partition; "auto" sizes batch reads to about 1 GiB per task
+    description: EPK sub-splits per physical partition; each costs about the RU of a scan of the whole partition
     default: "1"
   priority:
     description: Priority-based execution, Low or High; "default" does not send the option

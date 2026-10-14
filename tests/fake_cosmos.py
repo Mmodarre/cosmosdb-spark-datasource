@@ -350,11 +350,6 @@ class FakeBackend:
     def rid(self) -> str:
         return self.store.rid
 
-    def quota(self) -> dict[str, int]:
-        docs = self.store.live_documents()
-        size = sum(len(json.dumps(d)) for d in docs)
-        return {"documentsSize": max(1, size // 1024), "documentsCount": len(docs)}
-
     def feed_ranges(self, force_refresh: bool = False) -> list[tuple[str, str]]:
         store = self._request("feed_ranges") if self.store.throttle_calls.get("feed_ranges") else self.store
         return [(p.lo, p.hi) for p in store.partitions]

@@ -83,7 +83,7 @@ paths (`client.py`, `backend.py`).
    1. Mint a token for AAD modes.
    2. Read container properties (partition key paths, kind, version).
    3. Call `read_feed_ranges(force_refresh=True)`.
-   4. Sub-split every feed range into `partitions_per_feed_range` EPK sub-ranges. `auto` uses `documentsSize / feed_ranges / 1 GiB`, capped at 64.
+   4. Sub-split every feed range into `partitions_per_feed_range` EPK sub-ranges; `auto` is 1. An EPK-filtered query (`x-ms-read-key-type: EffectivePartitionKeyRange`) costs about the RU of a scan of the whole physical partition, whatever the sub-range: measured on 10M documents in 17 partitions, 2, 8 and 16 sub-ranges cost 2.0, 6.3 and 12 times the RU of 1, and each extra sub-range about 10,500 RU, the cost of a full scan of one partition (about 590k documents). The Java connector's `Aggressive` partitioning shows the same (3.4 times for 4 sub-ranges). The scan was not faster (N = 2: 28.7 s against 27.8 s), so size-based sub-splitting was dropped.
    5. Return one `CosmosQueryPartition` per sub-range, carrying the token and partition key definition.
 2. `read()` (executor): `batch.query_documents` runs `query_items(query, parameters, feed_range=<scope>, max_item_count=page_size)` page by page, with every scope inside one physical partition; rows are yielded as documents arrive, so a partition is never materialized. After the SDK's own retries are exhausted, transient errors resume from the last fully consumed page's continuation. Splits and duplicates: next section.
 3. Queries run independently per sub-range. `ORDER BY`, `GROUP BY`, `DISTINCT`, `TOP` and aggregates are therefore per partition (a warning is logged).
