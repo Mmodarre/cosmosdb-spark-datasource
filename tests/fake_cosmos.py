@@ -116,6 +116,9 @@ class FakeCosmosStore:
         self.lag_requests = 0
         self.lag_delta = 0
         self.query_lag_requests = 0  # query pages served by a replica lagging query_lag_delta LSNs
+        # change-feed requests for a range that spans a split fail with RecursionError, as azure-cosmos
+        # 4.17.1 did when its unbounded 410 handling kept meeting a gone range
+        self.gone_recursion_errors = 0
         self.query_lag_delta = 0
         self.request_count = 0
         self.call_log: list[list[Any]] = []
@@ -516,6 +519,10 @@ class FakeBackend:
             store = self._request()
             lo, hi, after = children[0]
             parts = store.overlapping(lo, hi)
+            if len(parts) > 1 and store.gone_recursion_errors > 0:
+                store.gone_recursion_errors -= 1
+                store.save()
+                raise RecursionError("maximum recursion depth exceeded")
             if len(parts) > 1:
                 # Split: like azure-cosmos (handle_feed_range_gone) the child tokens get the FULL
                 # child partition ranges, not intersected with the token's own range.

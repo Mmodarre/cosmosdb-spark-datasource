@@ -61,6 +61,9 @@ First public release.
 
 ### Fixed
 
+- A replay of a micro-batch planned before partition splits could fail with `RecursionError` from
+  azure-cosmos's unbounded 410 handling. The change-feed read now retries it, and an escaped 410,
+  from a continuation rebuilt for the current partitions.
 - After a container was deleted and re-created, a new stream (new checkpoint) failed on Python
   workers that had read the old container (`Invalid continuation: [Mismatch collection rid]`)
   until the workers restarted. A change-feed read now refreshes the client's cached container

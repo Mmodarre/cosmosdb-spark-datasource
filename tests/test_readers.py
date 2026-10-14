@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - exercised on PySpark 4.0/4.1
 from pyspark.sql.types import IntegerType, StringType, StructField, StructType
 
 from cosmosdb_datasource import _base
-from cosmosdb_datasource.errors import CosmosConfigError, CosmosOffsetError
+from cosmosdb_datasource.errors import CosmosChangeFeedError, CosmosConfigError, CosmosOffsetError
 from cosmosdb_datasource.offsets import Offset, RangeState
 from tests.conftest import fake_options
 from tests.harness import StreamHarness, make_source, run_batch
@@ -253,6 +253,61 @@ def test_split_after_planning_before_read(make_store) -> None:
     load(store, 25, start=100)  # beyond the planned end
     rows = h.read_range(start, end)
     assert ids(h, rows) == sorted(f"d{i}" for i in range(100))
+
+
+@pytest.mark.parametrize("factor", [1, 2])
+def test_replay_of_a_batch_planned_before_two_splits_survives_recursion_errors(make_store, no_sleep, factor) -> None:
+    """A batch planned before the partition split twice is replayed while the SDK fails on the gone range."""
+    store = make_store(partitions=1)
+    h = stream(store, change_feed_mode="AllVersionsAndDeletes", partitions_per_feed_range=factor)
+    h.start()
+    h.run_batch()
+    load(store, 60)
+    end = h.latest()  # planned on the single partition
+    h.offset_log.append((h.committed, end))
+    first = store.split(store.partitions[0].id)[0]
+    store.split(first.id)
+    load(store, 30, start=100)  # after the batch: not part of it
+    store.gone_recursion_errors = 50  # more than the retries: only a re-planned continuation gets through
+    rows = h.read_range(h.committed, end)
+    assert sorted(ids(h, rows)) == sorted(f"d{i}" for i in range(60))
+    assert 50 - factor <= store.gone_recursion_errors < 50  # at most one error per task, then a re-planned continuation
+
+
+def test_recursion_errors_without_a_replan_exhaust_the_retries(make_store, no_sleep) -> None:
+    from cosmosdb_datasource import changefeed, retry
+    from tests.fake_cosmos import FakeBackend
+
+    store = make_store(partitions=1)
+    load(store, 10)
+    store.split(store.partitions[0].id)
+    store.gone_recursion_errors = 10
+    backend = FakeBackend(store)
+    with pytest.raises(RecursionError):
+        list(
+            changefeed.read_bounded(
+                lambda resume: backend.change_feed_pages(("", "FF"), "LatestVersion", 0, 5, resume),
+                start_lsn=0,
+                end_lsn=10,
+                mode="LatestVersion",
+                policy=retry.RetryPolicy(max_retries=3),
+                end_wait_seconds=1,
+                stats=changefeed.ReadStats(),
+                describe="test",
+            )
+        )
+
+
+def test_split_positions_follows_the_current_partitions() -> None:
+    from cosmosdb_datasource.changefeed import Position, split_positions
+
+    got = split_positions(
+        [Position("", "80", 5), Position("80", "FF", 9)], [("", "40"), ("40", "C0"), ("C0", "FF")], "", "FF"
+    )
+    assert got == [Position("", "40", 5), Position("40", "80", 5), Position("80", "C0", 9), Position("C0", "FF", 9)]
+    assert split_positions([Position("", "FF", 3)], [("", "FF")], "20", "60") == [Position("20", "60", 3)]
+    with pytest.raises(CosmosChangeFeedError, match="Cannot rebuild"):
+        split_positions([Position("", "40", 3)], [("", "FF")], "", "FF")
 
 
 def test_replica_lag_is_waited_out(make_store, no_sleep) -> None:
