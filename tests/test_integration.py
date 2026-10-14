@@ -1,11 +1,26 @@
-"""Integration tests against the real account described by config/cosmos.local.json.
+"""Integration tests against Azure Cosmos DB for NoSQL or a Cosmos DB emulator.
 
-Skipped unless the config file exists. Shared containers (consults, events) are only read; all
-writes go to dedicated containers (``it_<random>``, ``it_snap_<random>``, 400 RU/s) created and
-deleted by this module.
+Configuration, from the environment:
 
-Auth: account key from $COSMOS_KEY or ``auth.key_fetch_command`` (az CLI), and AAD via
-``auth_type=default`` (AzureCliCredential through DefaultAzureCredential).
+``COSMOS_ENDPOINT``, ``COSMOS_KEY``
+    Account endpoint and key. Required; every test is skipped without them.
+``COSMOS_DATABASE``
+    Database for the test containers, created if missing (default ``cosmosdb_datasource_it``).
+``COSMOS_EMULATOR``
+    ``vnext`` or ``legacy`` when the endpoint is that emulator: tests that need a capability it
+    lacks are skipped (see ``EMULATOR_UNSUPPORTED``).
+``COSMOS_UNSUPPORTED``
+    Comma-separated capability markers to skip, e.g. ``requires_avad`` for an account without the
+    AllVersionsAndDeletes change feed.
+``COSMOS_MULTI_PARTITION_THROUGHPUT``
+    RU/s for the containers of the ``requires_multi_partition`` tests; it must yield more than one
+    physical partition (e.g. 20000 on the legacy emulator, at least 12000 on an account).
+``COSMOS_AAD=1``
+    Also run the ``auth_type=default`` test. ``DefaultAzureCredential`` must find an identity with a
+    Cosmos DB data-plane role on the account.
+
+Tests write only to containers they create (``it_<random>``) and delete them afterwards. Other
+containers are created without explicit throughput, so serverless accounts work too.
 """
 
 from __future__ import annotations
@@ -13,90 +28,191 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shlex
-import subprocess
+import pickle
+import random
+import sys
+import threading
+import time
 import uuid
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pyspark import cloudpickle
 from pyspark.sql.types import ArrayType, LongType, StringType, StructField, StructType, TimestampType
 
+from tests.conftest import java_major
 from tests.harness import StreamHarness, make_source, run_batch, validate_rows
 
-CONFIG = Path(__file__).resolve().parents[2] / "config" / "cosmos.local.json"
+ENDPOINT = os.environ.get("COSMOS_ENDPOINT", "")
+KEY = os.environ.get("COSMOS_KEY", "")
+DATABASE = os.environ.get("COSMOS_DATABASE") or "cosmosdb_datasource_it"
+EMULATOR = os.environ.get("COSMOS_EMULATOR", "")
+MULTI_PARTITION_THROUGHPUT = int(os.environ.get("COSMOS_MULTI_PARTITION_THROUGHPUT") or 0)
+AAD = os.environ.get("COSMOS_AAD") == "1"
+UNSUPPORTED = {s.strip() for s in os.environ.get("COSMOS_UNSUPPORTED", "").split(",") if s.strip()}
+
+CAPABILITIES = {
+    "requires_avad": "AllVersionsAndDeletes change feed",
+    "requires_epk_ranges": "EPK sub-range filtering",
+    "requires_multi_partition": "multiple physical partitions",
+    "requires_session_tokens": "session token enforcement",
+    "requires_aad": "Entra ID authentication",
+}
+# Observed on GitHub's ubuntu-24.04 runners with azure-cosmos 4.17.1.
+EMULATOR_UNSUPPORTED = {
+    # Linux vNext emulator, vnext-EN20261008: AllVersionsAndDeletes requests return LatestVersion
+    # items, EPK sub-range filters are ignored, every container has one physical partition, session
+    # tokens are not enforced and requests are not authenticated.
+    "vnext": frozenset(CAPABILITIES),
+    # Legacy Linux emulator, 2.14.28 (x64 only): AllVersionsAndDeletes is rejected with HTTP 400
+    # ("must be enabled"), and only key authentication exists.
+    "legacy": frozenset({"requires_avad", "requires_aad"}),
+}
+if EMULATOR and EMULATOR not in EMULATOR_UNSUPPORTED:
+    raise ValueError(f"COSMOS_EMULATOR must be one of {', '.join(EMULATOR_UNSUPPORTED)}, got {EMULATOR!r}")
 
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(not CONFIG.exists(), reason=f"{CONFIG} not found (no real Cosmos DB account configured)"),
+    pytest.mark.skipif(not (ENDPOINT and KEY), reason="COSMOS_ENDPOINT and COSMOS_KEY are not set"),
 ]
+if EMULATOR:
+    # azure-cosmos does not verify TLS certificates for localhost endpoints.
+    pytestmark.append(pytest.mark.filterwarnings("ignore::urllib3.exceptions.InsecureRequestWarning"))
+
+
+def _skip_reason(names: set[str]) -> str | None:
+    lacking = names & EMULATOR_UNSUPPORTED.get(EMULATOR, frozenset())
+    if lacking:
+        return f"the {EMULATOR} emulator does not support: {', '.join(sorted(CAPABILITIES[n] for n in lacking))}"
+    if names & UNSUPPORTED:
+        return f"disabled by COSMOS_UNSUPPORTED: {', '.join(sorted(names & UNSUPPORTED))}"
+    if "requires_multi_partition" in names and not MULTI_PARTITION_THROUGHPUT:
+        return "COSMOS_MULTI_PARTITION_THROUGHPUT is not set"
+    if "requires_aad" in names and not AAD:
+        return "COSMOS_AAD is not set"
+    return None
+
+
+def requires(*names: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Apply the capability markers ``names`` and skip the test where a capability is missing.
+
+    A ``skipif`` mark (not a fixture) so that module-scoped fixtures are not set up for skipped tests.
+    """
+    unknown = set(names) - CAPABILITIES.keys()
+    if unknown:
+        raise ValueError(f"unknown capability markers: {sorted(unknown)}")
+    reason = _skip_reason(set(names))
+
+    def decorate(test: Callable[..., Any]) -> Callable[..., Any]:
+        for name in names:
+            test = getattr(pytest.mark, name)(test)
+        return pytest.mark.skipif(reason is not None, reason=reason or "")(test)
+
+    return decorate
 
 
 @pytest.fixture(scope="session")
-def cfg() -> dict:
-    return json.loads(CONFIG.read_text())
-
-
-@pytest.fixture(scope="session")
-def account_key(cfg: dict) -> str:
-    key = os.environ.get("COSMOS_KEY")
-    if key:
-        return key
-    command = cfg.get("auth", {}).get("key_fetch_command")
-    if not command:
-        pytest.skip("no COSMOS_KEY and no key_fetch_command in config")
-    proc = subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=120, check=False)
-    if proc.returncode != 0 or not proc.stdout.strip():
-        pytest.skip("could not fetch the account key with the az CLI")
-    return proc.stdout.strip()
-
-
-@pytest.fixture(scope="session")
-def sdk_db(cfg: dict, account_key: str):
+def sdk_db() -> Iterator[Any]:
     from azure.cosmos import CosmosClient
 
-    client = CosmosClient(cfg["endpoint"], credential=account_key)
-    yield client.get_database_client(cfg["database"])
-    client.__exit__(None, None, None)  # close() is missing in azure-cosmos 4.14
+    client = CosmosClient(ENDPOINT, credential=KEY)
+    yield client.create_database_if_not_exists(DATABASE)
+    client.__exit__(None, None, None)  # CosmosClient.close() does not exist in azure-cosmos 4.14
 
 
-def key_options(cfg: dict, key: str, container: str, **extra) -> dict[str, str]:
+@contextlib.contextmanager
+def temporary_container(db: Any, *, version: int = 2, throughput: int | None = None) -> Iterator[tuple[str, Any]]:
+    from azure.cosmos import PartitionKey
+    from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+    name = f"it_{uuid.uuid4().hex[:10]}"
+    try:
+        container = None
+        for attempt in range(4):
+            try:
+                # Idempotent: a client-side timeout may still have created the container.
+                container = db.create_container_if_not_exists(
+                    name,
+                    partition_key=PartitionKey(path="/pk", kind="Hash", version=version),
+                    **({"offer_throughput": throughput} if throughput else {}),
+                )
+                break
+            except Exception:
+                if attempt == 3:
+                    raise
+                time.sleep(5 * (attempt + 1))
+        yield name, container
+    finally:  # also after a failed creation that the service completed
+        with contextlib.suppress(CosmosResourceNotFoundError):
+            db.delete_container(name)
+
+
+@pytest.fixture
+def make_container(sdk_db: Any) -> Iterator[Callable[..., tuple[str, Any]]]:
+    with contextlib.ExitStack() as stack:
+        yield lambda **kwargs: stack.enter_context(temporary_container(sdk_db, **kwargs))
+
+
+def options(container: str, **extra: Any) -> dict[str, str]:
     opts = {
-        "endpoint": cfg["endpoint"],
-        "database": cfg["database"],
+        "endpoint": ENDPOINT,
+        "database": DATABASE,
         "container": container,
         "auth_type": "key",
-        "account_key": key,
+        "account_key": KEY,
     }
     opts.update({k: str(v) for k, v in extra.items()})
     return opts
 
 
-def aad_options(cfg: dict, container: str, **extra) -> dict[str, str]:
-    opts = {"endpoint": cfg["endpoint"], "database": cfg["database"], "container": container, "auth_type": "default"}
-    opts.update({k: str(v) for k, v in extra.items()})
-    return opts
+def document(i: int, keys: int = 13, **fields: Any) -> dict[str, Any]:
+    return {
+        "id": f"d{i}",
+        "pk": f"p{i % keys}",
+        "seq": i,
+        "createdAt": f"2026-01-{1 + i % 28:02d}T10:00:00.1234567Z",
+        "tags": [f"t{i % 3}", "all"],
+        "nested": {"x": i},
+        **fields,
+    }
 
 
-def count(db, container: str) -> int:
-    c = db.get_container_client(container)
-    return next(iter(c.query_items("SELECT VALUE COUNT(1) FROM c", enable_cross_partition_query=True)))
+def write(container: Any, start: int, n: int, **fields: Any) -> None:
+    for i in range(start, start + n):
+        container.upsert_item(document(i, **fields))
 
 
-def feed_range_count(db, container: str) -> int:
-    return len(list(db.get_container_client(container).read_feed_ranges(force_refresh=True)))
+def seed(container: Any, n: int, keys: int = 20) -> None:
+    """``n`` documents, written in transactional batches (at most 100 operations, one partition key)."""
+    by_key: dict[str, list[dict[str, Any]]] = {}
+    for i in range(n):
+        doc = document(i, keys=keys)
+        by_key.setdefault(doc["pk"], []).append(doc)
+    for pk, docs in by_key.items():
+        for start in range(0, len(docs), 100):
+            container.execute_item_batch([("upsert", (d,)) for d in docs[start : start + 100]], partition_key=pk)
 
 
-def parallel_batch(options: dict[str, str], schema=None, workers: int = 8) -> tuple[list[tuple], list, list[int]]:
-    """Like harness.run_batch, but executes partitions concurrently (one 'executor' per thread)."""
-    ds = make_source(options)
-    schema = schema or ds.schema()
+def count(container: Any) -> int:
+    return next(iter(container.query_items("SELECT VALUE COUNT(1) FROM c", enable_cross_partition_query=True)))
+
+
+def feed_range_count(container: Any) -> int:
+    return len(list(container.read_feed_ranges(force_refresh=True)))
+
+
+def parallel_batch(opts: dict[str, str], workers: int = 8) -> tuple[list[tuple], list[Any], list[int]]:
+    """Like ``harness.run_batch``, but runs the partitions concurrently, one executor per thread."""
+    ds = make_source(opts)
+    schema = ds.schema()
     reader = ds.reader(schema)
     shipped = cloudpickle.dumps(reader)
     parts = reader.partitions()
 
-    def run(part):
+    def run(part: Any) -> list[tuple]:
         rows = list(cloudpickle.loads(shipped).read(part))
         validate_rows(rows, schema, ds)
         return rows
@@ -106,161 +222,139 @@ def parallel_batch(options: dict[str, str], schema=None, workers: int = 8) -> tu
     return [r for rows in results for r in rows], parts, [len(rows) for rows in results]
 
 
-def assert_count(db, container: str, before: int, rows: list[tuple]) -> None:
-    after = count(db, container)
+# -- batch reads ------------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def seeded(sdk_db: Any) -> Iterator[tuple[str, Any, int]]:
+    """Container with 600 documents, shared by the read-only batch tests."""
+    with temporary_container(sdk_db) as (name, container):
+        seed(container, 600)
+        yield name, container, 600
+
+
+def test_batch_reads_every_document(seeded) -> None:
+    name, container, n = seeded
+    rows, parts = run_batch(options(name))
+    assert len(parts) == feed_range_count(container)
+    assert sorted(r[0] for r in rows) == sorted(f"d{i}" for i in range(n))
+    for row in rows:
+        body = json.loads(row[4])
+        assert (row[0], row[1], row[2], row[3]) == (body["id"], body["pk"], body["_ts"], body["_etag"])
+
+
+def test_batch_user_schema(seeded) -> None:
+    name, _container, n = seeded
+    schema = StructType(
+        [
+            StructField("id", StringType()),
+            StructField("seq", LongType()),
+            StructField("createdAt", TimestampType()),
+            StructField("tags", ArrayType(StringType())),
+            StructField("nested", StructType([StructField("x", LongType())])),
+            StructField("_corrupt_record", StringType()),
+        ]
+    )
+    rows, _ = run_batch(options(name, page_size=100), schema)
+    assert len(rows) == n
+    assert all(r[5] is None for r in rows), "unexpected corrupt records"
+    assert all(r[1] == r[4][0] and r[2] is not None and r[3][-1] == "all" for r in rows)
+
+
+def test_batch_query_with_parameters(seeded) -> None:
+    name, _container, _n = seeded
+    rows, _ = run_batch(
+        options(
+            name,
+            query="SELECT c.id, c.pk FROM c WHERE c.seq < @limit",
+            query_parameters=json.dumps([{"name": "@limit", "value": 50}]),
+        )
+    )
+    assert sorted(r[0] for r in rows) == sorted(f"d{i}" for i in range(50))
+
+
+def test_batch_auto_partitioning(seeded) -> None:
+    name, container, n = seeded
+    rows, parts = run_batch(options(name, partitions_per_feed_range="auto"))
+    assert len(parts) % feed_range_count(container) == 0
+    assert len(rows) == n
+
+
+@requires("requires_epk_ranges")
+def test_batch_epk_sub_split_hash_v1(make_container) -> None:
+    name, container = make_container(version=1)
+    seed(container, 2000, keys=200)
+    rows, parts, sizes = parallel_batch(options(name, partitions_per_feed_range=4))
+    assert len(parts) == 4 * feed_range_count(container)
     ids = [r[0] for r in rows]
-    assert len(ids) == len(set(ids)), "duplicate documents in batch read"
-    if before == after:
-        assert len(ids) == before
-    else:  # someone mutated the shared container during the read
-        pytest.skip(f"{container} changed during the read ({before} -> {after}); exact count not checkable")
-
-
-# -- batch: shared containers (read-only) -----------------------------------------------------
-
-
-def test_batch_consults_key_auth(cfg, account_key, sdk_db) -> None:
-    before = count(sdk_db, "consults")
-    rows, parts = run_batch(key_options(cfg, account_key, "consults"))
-    assert len(parts) == feed_range_count(sdk_db, "consults")
-    assert_count(sdk_db, "consults", before, rows)
-    sample = rows[0]
-    body = json.loads(sample[4])
-    assert sample[0] == body["id"] and sample[1] == body["patientId"] and sample[2] == body["_ts"]
-
-
-def test_batch_consults_sub_split_v1(cfg, account_key, sdk_db) -> None:
-    before = count(sdk_db, "consults")
-    rows, parts, sizes = parallel_batch(key_options(cfg, account_key, "consults", partitions_per_feed_range=4))
-    assert len(parts) == 4 * feed_range_count(sdk_db, "consults")
-    assert_count(sdk_db, "consults", before, rows)
+    assert len(ids) == len(set(ids)) == 2000
     mean = sum(sizes) / len(sizes)
     assert all(abs(s - mean) / mean < 0.5 for s in sizes), f"unbalanced V1 sub-split: {sizes}"
 
 
-def test_batch_consults_aad_default_credential(cfg, sdk_db) -> None:
+@pytest.fixture(scope="module")
+def multi_partition(sdk_db: Any) -> Iterator[tuple[str, Any, int]]:
+    """Container with several physical partitions and 2000 documents."""
+    with temporary_container(sdk_db, throughput=MULTI_PARTITION_THROUGHPUT) as (name, container):
+        ranges = feed_range_count(container)
+        assert ranges > 1, f"{MULTI_PARTITION_THROUGHPUT} RU/s gave a single physical partition"
+        seed(container, 2000, keys=200)
+        yield name, container, ranges
+
+
+@requires("requires_multi_partition")
+def test_batch_multi_partition(multi_partition) -> None:
+    name, _container, ranges = multi_partition
+    rows, parts, sizes = parallel_batch(options(name))
+    assert len(parts) == ranges and all(sizes)
+    ids = [r[0] for r in rows]
+    assert len(ids) == len(set(ids)) == 2000
+
+
+@requires("requires_multi_partition", "requires_epk_ranges")
+def test_batch_multi_partition_sub_split(multi_partition) -> None:
+    name, _container, ranges = multi_partition
+    rows, parts, _sizes = parallel_batch(options(name, partitions_per_feed_range=3))
+    assert len(parts) == 3 * ranges
+    ids = [r[0] for r in rows]
+    assert len(ids) == len(set(ids)) == 2000
+
+
+@requires("requires_aad")
+def test_batch_default_credential(seeded) -> None:
     pytest.importorskip("azure.identity")
-    before = count(sdk_db, "consults")
-    try:
-        rows, parts = run_batch(aad_options(cfg, "consults"))
-    except Exception as exc:  # pragma: no cover - environment dependent
-        pytest.skip(f"AAD auth not available here: {type(exc).__name__}: {exc}")
+    name, _container, n = seeded
+    rows, parts = run_batch({"endpoint": ENDPOINT, "database": DATABASE, "container": name, "auth_type": "default"})
     assert parts[0].token is not None and "redacted" in repr(parts[0].token)
-    assert_count(sdk_db, "consults", before, rows)
+    assert len(rows) == n
 
 
-def test_batch_consults_user_schema(cfg, account_key) -> None:
-    schema = StructType(
-        [
-            StructField("id", StringType()),
-            StructField("patientId", StringType()),
-            StructField("seq", LongType()),
-            StructField("createdAt", TimestampType()),
-            StructField("tags", ArrayType(StringType())),
-            StructField("_corrupt_record", StringType()),
-        ]
-    )
-    rows, _ = run_batch(key_options(cfg, account_key, "consults", page_size=500), schema)
-    assert rows and all(r[5] is None for r in rows), "unexpected corrupt records"
-    assert all(isinstance(r[2], int) and r[3] is not None for r in rows)
+# -- change feed ------------------------------------------------------------------------------------
 
 
-def test_batch_events_all_feed_ranges(cfg, account_key, sdk_db) -> None:
-    ranges = feed_range_count(sdk_db, "events")
-    assert ranges >= 4
-    before = count(sdk_db, "events")
-    opts = key_options(
-        cfg,
-        account_key,
-        "events",
-        query="SELECT c.id FROM c",
-        page_size=5000,
-        partitions_per_feed_range=2,
-        throttle_max_wait_seconds=300,
-        log_metrics="true",
-    )
-    rows, parts, _sizes = parallel_batch(opts, workers=8)
-    assert len(parts) == 2 * ranges
-    assert_count(sdk_db, "events", before, rows)
-
-
-def test_batch_events_auto_partitioning(cfg, account_key, sdk_db) -> None:
-    ds = make_source(key_options(cfg, account_key, "events", partitions_per_feed_range="auto"))
-    parts = ds.reader(ds.schema()).partitions()
-    ranges = feed_range_count(sdk_db, "events")
-    assert len(parts) % ranges == 0  # ~1 GB container -> 1 split per range with the 1 GiB target
-
-
-def test_stream_offsets_on_events_are_cheap_and_stable(cfg, account_key, sdk_db) -> None:
-    h = StreamHarness(key_options(cfg, account_key, "events", change_feed_mode="LatestVersion", start_from="Now"))
+def test_stream_offsets_are_stable_without_changes(make_container) -> None:
+    name, container = make_container()
+    write(container, 0, 20)
+    h = StreamHarness(options(name, change_feed_mode="LatestVersion", start_from="Now"))
     start = json.loads(h.start())
-    assert len(start["ranges"]) == feed_range_count(sdk_db, "events")
-    first = h.run_batch()  # batch 0 always runs for a new query
-    if first:  # concurrent mutations by datagen are possible
-        pytest.skip("events changed while probing offsets")
+    assert len(start["ranges"]) == feed_range_count(container)
+    assert h.run_batch() == []  # batch 0 always runs for a new query
     assert h.run_batch() is None
 
 
-def test_stream_consults_from_beginning(cfg, account_key, sdk_db) -> None:
-    before = count(sdk_db, "consults")
-    h = StreamHarness(key_options(cfg, account_key, "consults", change_feed_mode="LatestVersion", page_size=1000))
-    h.start()
-    rows = h.run_batch()
-    ids = h.column(rows, "id")
-    assert len(ids) == len(set(ids))
-    if count(sdk_db, "consults") == before:
-        assert len(ids) == before
-    assert set(h.column(rows, "operation")) == {"upsert"}
-
-
-# -- streaming: dedicated test container ------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def test_container(sdk_db):
-    import time
-
-    from azure.cosmos import PartitionKey
-    from azure.cosmos.exceptions import CosmosResourceNotFoundError
-
-    name = f"it_{uuid.uuid4().hex[:8]}"
-    try:
-        container = None
-        for attempt in range(4):
-            try:
-                # idempotent: a client-side timeout may still have created the container server-side
-                container = sdk_db.create_container_if_not_exists(
-                    name, partition_key=PartitionKey(path="/pk", kind="Hash", version=1), offer_throughput=400
-                )
-                break
-            except Exception:
-                if attempt == 3:
-                    raise
-                time.sleep(5 * (attempt + 1))
-        yield name, container
-    finally:  # always clean up, even if creation raised after the service created the container
-        with contextlib.suppress(CosmosResourceNotFoundError):
-            sdk_db.delete_container(name)
-
-
-def write(container, start: int, n: int, keys: int = 13, **fields) -> None:
-    for i in range(start, start + n):
-        container.upsert_item({"id": f"d{i}", "pk": f"p{i % keys}", "v": i, **fields})
-
-
-def test_stream_latest_version_incremental_and_restart(cfg, account_key, test_container) -> None:
-    name, container = test_container
+def test_stream_latest_version_incremental_and_restart(make_container) -> None:
+    name, container = make_container()
     write(container, 0, 120)
     container.execute_item_batch(
-        [("upsert", ({"id": f"tb{i}", "pk": "batch", "v": i},)) for i in range(30)], partition_key="batch"
+        [("upsert", ({"id": f"tb{i}", "pk": "batch", "seq": i},)) for i in range(30)], partition_key="batch"
     )
-    h = StreamHarness(key_options(cfg, account_key, name, change_feed_mode="LatestVersion", page_size=25))
+    h = StreamHarness(options(name, change_feed_mode="LatestVersion", page_size=25))
     h.start()
     first = h.run_batch()
-    ids = sorted(h.column(first, "id"))
-    assert ids == sorted([f"d{i}" for i in range(120)] + [f"tb{i}" for i in range(30)])
+    assert sorted(h.column(first, "id")) == sorted([f"d{i}" for i in range(120)] + [f"tb{i}" for i in range(30)])
     tb_lsns = {lsn for i, lsn in zip(h.column(first, "id"), h.column(first, "lsn"), strict=True) if i.startswith("tb")}
     assert len(tb_lsns) == 1, "a transactional batch shares one LSN"
+    assert set(h.column(first, "operation")) == {"upsert"}
     assert h.run_batch() is None
     write(container, 120, 10)
     write(container, 0, 5, updated=True)
@@ -272,9 +366,50 @@ def test_stream_latest_version_incremental_and_restart(cfg, account_key, test_co
     assert sorted(h.column(h.run_batch(), "id")) == ["d130", "d131", "d132"]
 
 
-def test_stream_all_versions_and_deletes(cfg, account_key, test_container) -> None:
-    name, container = test_container
-    h = StreamHarness(key_options(cfg, account_key, name, change_feed_mode="AllVersionsAndDeletes", page_size=10))
+def test_stream_max_items_per_trigger(make_container) -> None:
+    name, container = make_container()
+    write(container, 0, 150)
+    h = StreamHarness(options(name, change_feed_mode="LatestVersion", max_items_per_trigger=40))
+    h.start()
+    rows = h.run_until_idle()
+    assert len(h.batches) > 1
+    assert sorted(h.column(rows, "id")) == sorted(f"d{i}" for i in range(150))
+
+
+@requires("requires_epk_ranges")
+def test_stream_epk_sub_split(make_container) -> None:
+    name, container = make_container()
+    write(container, 0, 150)
+    whole = StreamHarness(options(name, change_feed_mode="LatestVersion"))
+    split = StreamHarness(options(name, change_feed_mode="LatestVersion", partitions_per_feed_range=4))
+    whole.start(), split.start()
+    all_whole, all_split = whole.run_until_idle(), split.run_until_idle()
+    assert sorted(split.column(all_split, "id")) == sorted(whole.column(all_whole, "id"))
+    assert len(set(split.column(all_split, "id"))) == len(all_split) == 150
+
+
+@requires("requires_multi_partition")
+def test_stream_multi_partition(make_container) -> None:
+    name, container = make_container(throughput=MULTI_PARTITION_THROUGHPUT)
+    ranges = feed_range_count(container)
+    assert ranges > 1
+    seed(container, 1000, keys=200)
+    h = StreamHarness(options(name, change_feed_mode="LatestVersion", max_items_per_trigger=50))
+    start = json.loads(h.start())
+    assert len(start["ranges"]) == ranges
+    rows = h.run_until_idle()
+    assert len(h.batches) > 1
+    assert sorted(h.column(rows, "id")) == sorted(f"d{i}" for i in range(1000))
+    assert len(set(h.column(rows, "feed_range"))) == ranges
+    h.restart()
+    write(container, 5000, 40, keys=200)
+    assert sorted(h.column(h.run_until_idle(), "id")) == sorted(f"d{i}" for i in range(5000, 5040))
+
+
+@requires("requires_avad")
+def test_stream_all_versions_and_deletes(make_container) -> None:
+    name, container = make_container()
+    h = StreamHarness(options(name, change_feed_mode="AllVersionsAndDeletes", page_size=10))
     h.start()
     container.upsert_item({"id": "avad", "pk": "x", "v": 1})
     container.upsert_item({"id": "avad", "pk": "x", "v": 2})
@@ -285,7 +420,7 @@ def test_stream_all_versions_and_deletes(cfg, account_key, test_container) -> No
     assert [op for _, op, _ in sorted(events, key=lambda e: e[2])] == ["create", "replace", "delete"]
     delete = next(r for r in rows if r[0] == "avad" and r[2] == "delete")
     assert delete[1] == "x" and delete[7] is None and delete[3] == delete[5]
-    # replay of the checkpointed range after further writes returns identical rows
+    # A replay of the logged batch after further writes returns identical rows.
     write(container, 515, 5)
     container.delete_item("d500", partition_key=f"p{500 % 13}")
     assert h.read_range(*h.offset_log[0]) == rows
@@ -295,55 +430,12 @@ def test_stream_all_versions_and_deletes(cfg, account_key, test_container) -> No
     )
 
 
-def test_stream_cap_and_sub_split(cfg, account_key, test_container) -> None:
-    name, container = test_container
-    write(container, 1000, 150)  # self-contained: do not depend on data from other tests
-    capped = StreamHarness(
-        key_options(cfg, account_key, name, change_feed_mode="LatestVersion", max_items_per_trigger=40)
-    )
-    split = StreamHarness(
-        key_options(cfg, account_key, name, change_feed_mode="LatestVersion", partitions_per_feed_range=4)
-    )
-    capped.start(), split.start()
-    all_capped = capped.run_until_idle()
-    all_split = split.run_until_idle()
-    assert len(capped.batches) > 1
-    assert sorted(capped.column(all_capped, "id")) == sorted(split.column(all_split, "id"))
-    assert len(set(capped.column(all_capped, "id"))) == len(all_capped)
+# -- initial snapshot -------------------------------------------------------------------------------
 
 
-# -- initial snapshot under concurrent writes: dedicated container ----------------------------
-
-
-@pytest.fixture
-def snapshot_container(sdk_db):
-    import time
-
-    from azure.cosmos import PartitionKey
-    from azure.cosmos.exceptions import CosmosResourceNotFoundError
-
-    name = f"it_snap_{uuid.uuid4().hex[:8]}"
-    try:
-        container = None
-        for attempt in range(4):
-            try:
-                container = sdk_db.create_container_if_not_exists(
-                    name, partition_key=PartitionKey(path="/pk"), offer_throughput=400
-                )
-                break
-            except Exception:
-                if attempt == 3:
-                    raise
-                time.sleep(5 * (attempt + 1))
-        yield name, container
-    finally:  # always clean up, including on failure
-        with contextlib.suppress(CosmosResourceNotFoundError):
-            sdk_db.delete_container(name)
-
-
-def _merge_latest(rows: list[dict]) -> dict[tuple, int]:
-    """README rule: latest row per (pk, id) by struct(operation <> 'snapshot', _ts, lsn); delete = absent."""
-    best: dict[tuple, dict] = {}
+def _merge_latest(rows: list[dict[str, Any]]) -> dict[tuple[Any, Any], int]:
+    """Latest row per (pk, id) by struct(operation <> 'snapshot', _ts, lsn); a delete means absent."""
+    best: dict[tuple[Any, Any], dict[str, Any]] = {}
     for r in rows:
         key = (r["pk"], r["id"])
         rank = (r["operation"] != "snapshot", r["_ts"], r["lsn"])
@@ -352,37 +444,98 @@ def _merge_latest(rows: list[dict]) -> dict[tuple, int]:
     return {k: r["_ts"] for k, r in best.items() if r["operation"] != "delete"}
 
 
-def test_initial_snapshot_with_concurrent_writes_converges(cfg, account_key, sdk_db, snapshot_container) -> None:
-    """batch 0 = snapshot read while another thread inserts, updates and deletes; then AvailableNow drains.
+def _container_state(container: Any) -> dict[tuple[Any, Any], int]:
+    query = "SELECT c.id, c.pk, c._ts FROM c"
+    return {(d["pk"], d["id"]): d["_ts"] for d in container.query_items(query, enable_cross_partition_query=True)}
 
-    At 400 RU/s the container has one physical partition, so the snapshot is spread over four EPK
-    sub-ranges (partitions_per_feed_range=4). The account's default consistency (Session) makes the
-    session-token pinning observable: every snapshot query must carry the token recorded in batch 0's end
-    offset, and a token ahead of the service must be rejected with 404/1002.
+
+def _run_snapshot_batch(
+    h: StreamHarness,
+    start: str,
+    end: str,
+    *,
+    before_read: Callable[[list[Any]], None] = lambda parts: None,
+    on_row: Callable[[int, tuple], None] = lambda i, row: None,
+) -> list[tuple]:
+    """Batch 0 as Spark runs it: log the offsets, plan, then read each partition in a fresh executor."""
+    from cosmosdb_datasource import client as client_module
+
+    h.offset_log.append((start, end))
+    parts = h.planner.partitions(json.loads(start), json.loads(end))
+    before_read(parts)
+    rows: list[tuple] = []
+    for part in parts:
+        # A new client per task, as in a separate executor process: its session container is empty,
+        # so a session token on the wire can only come from the partition.
+        client_module.close_all()
+        executor = cloudpickle.loads(h._executor_blob)
+        for i, row in enumerate(executor.read(pickle.loads(pickle.dumps(part)))):
+            rows.append(row)
+            on_row(i, row)
+    validate_rows(rows, h.schema, h.ds)
+    h.planner.commit(json.loads(end))
+    h.committed = end
+    h.batches.append(rows)
+    return rows
+
+
+def test_initial_snapshot_latest_version_converges(make_container) -> None:
+    """LatestVersion with initial_snapshot: batch 0 is read while documents are inserted and updated."""
+    name, container = make_container()
+    seed(container, 500)
+    h = StreamHarness(
+        options(
+            name,
+            change_feed_mode="LatestVersion",
+            start_from="Now",
+            initial_snapshot="true",
+            initial_snapshot_delay_seconds="0",
+            page_size=50,
+        )
+    )
+    names = h.schema.fieldNames()
+    start = h.start()
+    end = h.latest()
+    new_ids = iter(range(10_000, 20_000))
+    rng = random.Random(3)
+
+    def mutate(i: int, _row: tuple) -> None:  # after every page: one insert, one update
+        if i % 50 == 49:
+            container.upsert_item(document(next(new_ids)))
+            container.upsert_item(document(rng.randrange(500), updated=True))
+
+    rows = [dict(zip(names, r, strict=True)) for r in _run_snapshot_batch(h, start, end, on_row=mutate)]
+    assert {r["operation"] for r in rows} == {"snapshot"} and len(rows) >= 500
+    rows += [dict(zip(names, r, strict=True)) for r in h.run_until_idle()]
+    assert any(r["operation"] == "upsert" for r in rows)
+    assert _merge_latest(rows) == _container_state(container)
+
+
+@requires("requires_avad", "requires_epk_ranges", "requires_session_tokens")
+def test_initial_snapshot_all_versions_with_concurrent_writes_converges(make_container) -> None:
+    """AVAD with initial_snapshot: batch 0 is read while another thread inserts, updates and deletes.
+
+    The container has one physical partition, so the snapshot is spread over four EPK sub-ranges.
+    With Session consistency every snapshot query must carry the session token recorded in batch 0's
+    end offset, and a token ahead of the service must be rejected with 404/1002.
     """
-    import pickle
-    import random
-    import threading
-    import time
-
     from azure.cosmos import _base as sdk_base
     from azure.cosmos.exceptions import CosmosHttpResponseError
 
-    from cosmosdb_datasource import client as client_module
     from cosmosdb_datasource.backend import feed_range_dict
     from cosmosdb_datasource.offsets import Offset
     from cosmosdb_datasource.stream import CosmosSnapshotPartition
 
-    name, container = snapshot_container
-    seeded = 2000
-    for start in range(0, seeded, 50):  # transactional batches of 50 documents per partition key
+    name, container = make_container()
+    if feed_range_count(container) != 1:
+        pytest.skip("needs a container with a single physical partition")
+    seeded_docs = 2000
+    for start in range(0, seeded_docs, 50):  # transactional batches of 50 documents per partition key
         pk = f"p{(start // 50) % 20}"
         ops = [("upsert", ({"id": f"s{i}", "pk": pk, "v": 0, "pad": "x" * 200},)) for i in range(start, start + 50)]
         container.execute_item_batch(ops, partition_key=pk)
 
-    opts = key_options(
-        cfg,
-        account_key,
+    opts = options(
         name,
         change_feed_mode="AllVersionsAndDeletes",
         initial_snapshot="true",
@@ -393,10 +546,9 @@ def test_initial_snapshot_with_concurrent_writes_converges(cfg, account_key, sdk
     )
     h = StreamHarness(opts, admission_control=True)
     names = h.schema.fieldNames()
-    as_dict = lambda row: dict(zip(names, row, strict=True))  # noqa: E731
     limit = h.planner.getDefaultReadLimit()
 
-    # AvailableNow run 1: target, P0, batch 0 (the snapshot) under concurrent writes.
+    # AvailableNow run 1: target, P0, then batch 0 (the snapshot) under concurrent writes.
     h.planner.prepareForTriggerAvailableNow()
     start = h.start()
     end = h.latest(limit)
@@ -404,7 +556,7 @@ def test_initial_snapshot_with_concurrent_writes_converges(cfg, account_key, sdk
     assert e0.ranges == p0.ranges and e0.init == p0.ranges and e0.snapshot == p0.snapshot
     tokens = dict(e0.snapshot.session)
     assert tokens, "Session consistency: the start probe must return a session token"
-    for r in p0.ranges:  # verified relation: the session token's global LSN is the probe's etag LSN
+    for r in p0.ranges:  # the session token's global LSN is the probe's etag LSN
         assert int(tokens[r.key].split(":")[1].split("#")[1]) == r.lsn
 
     sent: list[tuple[str, str | None]] = []
@@ -452,35 +604,27 @@ def test_initial_snapshot_with_concurrent_writes_converges(cfg, account_key, sdk
             time.sleep(0.02)
 
     thread = threading.Thread(target=writer, daemon=True)
-    snapshot_rows: list[tuple] = []
-    sdk_base.set_session_token_header = spy
-    try:
-        h.offset_log.append((start, end))  # Spark logs the batch before running it
-        parts = h.planner.partitions(json.loads(start), json.loads(end))
+
+    def start_writer(parts: list[Any]) -> None:
         assert len(parts) == 4 and all(isinstance(p, CosmosSnapshotPartition) for p in parts)
         thread.start()
-        for part in parts:
-            # A fresh client per task, as in a separate executor process: its session container is empty,
-            # so a session token on the wire can only come from the partition (recorded in batch 0's end).
-            client_module.close_all()
-            executor = cloudpickle.loads(h._executor_blob)
-            for i, row in enumerate(executor.read(pickle.loads(pickle.dumps(part)))):
-                snapshot_rows.append(row)
-                seen.append((row[1], row[0]))
-                if i % 50 == 49:
-                    time.sleep(0.3)  # let the writer interleave with the page reads
+
+    def interleave(i: int, row: tuple) -> None:
+        seen.append((row[1], row[0]))
+        if i % 50 == 49:
+            time.sleep(0.3)  # let the writer interleave with the page reads
+
+    sdk_base.set_session_token_header = spy
+    try:
+        snapshot_rows = _run_snapshot_batch(h, start, end, before_read=start_writer, on_row=interleave)
     finally:
         stop.set()
         thread.join(timeout=60)
         sdk_base.set_session_token_header = original
-    validate_rows(snapshot_rows, h.schema, h.ds)
-    h.planner.commit(json.loads(end))
-    h.committed = end
-    h.batches.append(snapshot_rows)
-    rows = [as_dict(r) for r in snapshot_rows]
+    rows = [dict(zip(names, r, strict=True)) for r in snapshot_rows]
     assert {r["operation"] for r in rows} == {"snapshot"} and {r["lsn"] for r in rows} == {0}
     assert sent and all(token == tokens["-FF"] for _path, token in sent), "every snapshot query is pinned"
-    rows += [as_dict(r) for r in h.run_until_idle(limit)]  # run 1 ends at its target (captured before P0)
+    rows += [dict(zip(names, r, strict=True)) for r in h.run_until_idle(limit)]
 
     # Later AvailableNow runs drain the feed (repeated only if a probe lagged behind the last write).
     last_write = max(write_lsns)
@@ -488,34 +632,74 @@ def test_initial_snapshot_with_concurrent_writes_converges(cfg, account_key, sdk
         time.sleep(1)
         h.restart()
         h.planner.prepareForTriggerAvailableNow()
-        rows += [as_dict(r) for r in h.run_until_idle(limit)]
+        rows += [dict(zip(names, r, strict=True)) for r in h.run_until_idle(limit)]
         if min(json.loads(h.committed)["ranges"].values()) >= last_write:
             break
     assert min(json.loads(h.committed)["ranges"].values()) >= last_write
-
-    merged = _merge_latest(rows)
-    actual = {
-        (d["pk"], d["id"]): d["_ts"]
-        for d in container.query_items("SELECT c.id, c.pk, c._ts FROM c", enable_cross_partition_query=True)
-    }
-    assert merged == actual
+    assert _merge_latest(rows) == _container_state(container)
 
     # The race was exercised: changes overtook rows already read by the snapshot.
     snap = {(r["pk"], r["id"]): r["_ts"] for r in rows if r["operation"] == "snapshot"}
     changes = [r for r in rows if r["operation"] != "snapshot"]
     assert any((r["pk"], r["id"]) in snap and r["_ts"] > snap[(r["pk"], r["id"])] for r in changes)
     assert any(r["operation"] == "delete" and (r["pk"], r["id"]) in snap for r in changes)
-    assert len(snapshot_rows) >= seeded and counts["delete"] and counts["update"] and counts["insert"]
+    assert len(snapshot_rows) >= seeded_docs and counts["delete"] and counts["update"] and counts["insert"]
 
-    # Enforcement: a session token ahead of the service is refused (404/1002), not silently ignored.
+    # A session token ahead of the service is refused (404/1002), not silently ignored.
     pk_range, _, vector = tokens["-FF"].partition(":")
     version, global_lsn = vector.split("#")[:2]
     future = f"{pk_range}:{version}#{int(global_lsn) + 10**7}"
     with pytest.raises(CosmosHttpResponseError) as info:
         list(container.query_items("SELECT * FROM c", feed_range=feed_range_dict("", "FF"), session_token=future))
     assert (info.value.status_code, info.value.sub_status) == (404, 1002)
-    print(
-        f"initial snapshot live test: snapshot rows={len(snapshot_rows)} change rows={len(changes)} "
-        f"writes={counts} batches={len(h.batches)} pinned queries={len(sent)} token={tokens['-FF']} "
-        f"merged keys={len(merged)}"
+
+
+# -- local SparkSession -----------------------------------------------------------------------------
+
+
+@pytest.mark.spark
+def test_spark_batch_and_stream(make_container, tmp_path: Path) -> None:
+    """Batch and AvailableNow stream through a real local SparkSession (needs Java 17+)."""
+    java = java_major()
+    if java is None or java < 17:
+        pytest.skip(f"local Spark needs Java 17+ (found: {java or 'none'})")
+    from pyspark.sql import SparkSession
+
+    from cosmosdb_datasource import CosmosDBDataSource
+
+    name, container = make_container()
+    seed(container, 300)
+    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    spark = (
+        SparkSession.builder.master("local[2]")
+        .appName("cosmosdb-datasource-integration")
+        .config("spark.ui.enabled", "false")
+        .getOrCreate()
     )
+    try:
+        spark.dataSource.register(CosmosDBDataSource)
+        df = spark.read.format("cosmosdb").options(**options(name)).load()
+        assert df.count() == 300
+        assert df.select("id").distinct().count() == 300
+
+        def run_stream() -> None:
+            query = (
+                spark.readStream.format("cosmosdb")
+                .options(**options(name, change_feed_mode="LatestVersion"))
+                .load()
+                .writeStream.format("parquet")
+                .option("path", str(tmp_path / "out"))
+                .option("checkpointLocation", str(tmp_path / "chk"))
+                .trigger(availableNow=True)
+                .start()
+            )
+            query.awaitTermination(300)
+            assert query.exception() is None
+
+        run_stream()
+        write(container, 1000, 20)
+        run_stream()
+        out = spark.read.parquet(str(tmp_path / "out"))
+        assert out.count() == 320 and out.select("id").distinct().count() == 320
+    finally:
+        spark.stop()

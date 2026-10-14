@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -36,6 +39,19 @@ def make_store():
         return FakeCosmosStore(name, **kwargs).register()
 
     return factory
+
+
+def java_major() -> int | None:
+    """Major version of the ``java`` on PATH, or None if there is no working JVM."""
+    java = shutil.which("java")
+    if not java:
+        return None
+    try:
+        out = subprocess.run([java, "-version"], capture_output=True, text=True, timeout=30, check=False)
+    except Exception:
+        return None
+    match = re.search(r'version "(\d+)', out.stderr + out.stdout)
+    return int(match.group(1)) if match else None
 
 
 def fake_options(store: FakeCosmosStore, **extra: str) -> dict[str, str]:

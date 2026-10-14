@@ -8,34 +8,17 @@ Python workers inherit.
 from __future__ import annotations
 
 import os
-import re
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 from cosmosdb_datasource.options import TEST_HOOKS_ENV
-from tests.conftest import fake_options
+from tests.conftest import fake_options, java_major
 from tests.fake_cosmos import FakeCosmosStore
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def _java_major() -> int | None:
-    java = shutil.which("java")
-    if not java:
-        return None
-    try:
-        out = subprocess.run([java, "-version"], capture_output=True, text=True, timeout=30, check=False)
-    except Exception:
-        return None
-    match = re.search(r'version "(\d+)', out.stderr + out.stdout)
-    return int(match.group(1)) if match else None
-
-
-JAVA = _java_major()
+JAVA = java_major()
 pytestmark = [
     pytest.mark.spark,
     pytest.mark.skipif(JAVA is None or JAVA < 17, reason=f"local Spark needs Java 17+ (found: {JAVA or 'none'})"),
