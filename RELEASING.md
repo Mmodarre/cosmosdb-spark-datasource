@@ -7,7 +7,7 @@ Releases are made by pushing a tag `v<version>` on `main`. The
    `main`;
 2. builds the sdist and wheel, runs `twine check --strict` and
    [`check_dist.py`](.github/scripts/check_dist.py) (package-only wheel, metadata without e-mail
-   addresses, version equal to the tag and to `_version.py`);
+   addresses, version equal to the tag and to `pyproject.toml`);
 3. publishes to TestPyPI, if the repository variable `PUBLISH_TO_TESTPYPI` is `true`;
 4. publishes to PyPI, if the repository variable `PUBLISH_TO_PYPI` is `true`;
 5. creates a GitHub Release with the distributions, a `SHA256SUMS` file and the release notes
@@ -23,10 +23,8 @@ Versions follow [PEP 440](https://peps.python.org/pep-0440/). A version with a p
 (`0.3.0rc1`, `0.3.0b2`, `0.3.0.dev1`) is published as a GitHub pre-release; pip only installs it
 when asked for explicitly (`pip install --pre` or `==0.3.0rc1`).
 
-The version is defined in two places, which the CI build job checks against each other:
-
-- `version` in `pyproject.toml`;
-- `__version__` in `src/cosmosdb_datasource/_version.py`.
+The version is defined once, as `version` in `pyproject.toml`. `cosmosdb_datasource.__version__`
+reads it from the installed distribution's metadata.
 
 ## Making a release
 
@@ -39,8 +37,6 @@ The version is defined in two places, which the CI build job checks against each
    ```bash
    uv version X.Y.Z          # updates pyproject.toml and uv.lock
    ```
-
-   and set `__version__ = "X.Y.Z"` in `src/cosmosdb_datasource/_version.py`.
 3. Open a pull request, and merge it once CI is green.
 4. Tag the merge commit on `main` and push the tag:
 

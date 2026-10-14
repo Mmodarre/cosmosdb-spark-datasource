@@ -332,3 +332,15 @@ def test_throttle_retry_options_reach_the_sdk_including_zero(retries, wait) -> N
 def test_connection_policy_keeps_the_other_client_settings() -> None:
     policy = _sdk_policy(preferred_regions="West Europe,North Europe", connection_timeout_seconds="7")
     assert policy.PreferredLocations == ["West Europe", "North Europe"] and policy.RequestTimeout == 7
+
+
+def test_version_comes_from_the_distribution_metadata() -> None:
+    import re
+    from importlib.metadata import version
+    from pathlib import Path
+
+    import cosmosdb_datasource
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    declared = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
+    assert declared and cosmosdb_datasource.__version__ == version("cosmosdb-spark-datasource") == declared.group(1)
