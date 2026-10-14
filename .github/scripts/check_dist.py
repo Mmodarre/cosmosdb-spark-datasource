@@ -1,6 +1,6 @@
 """Check the built distributions in dist/.
 
-* exactly one wheel and one sdist, both with the version in ``_version.py``;
+* exactly one wheel and one sdist, both with the version in ``pyproject.toml``;
 * the wheel contains only the ``cosmosdb_datasource`` package and its ``.dist-info``;
 * the sdist contains only the package sources, README, LICENSE and pyproject.toml;
 * the core metadata contains no e-mail addresses.
@@ -27,10 +27,10 @@ SDIST_ALLOWED = re.compile(rf"^(PKG-INFO|README\.md|pyproject\.toml(\.orig)?|LIC
 
 
 def source_version() -> str:
-    text = (ROOT / "src" / PACKAGE / "_version.py").read_text()
-    match = re.search(r'^__version__ = "([^"]+)"$', text, re.MULTILINE)
+    text = (ROOT / "pyproject.toml").read_text()
+    match = re.search(r'^\[project\]$.*?^version = "([^"]+)"$', text, re.MULTILINE | re.DOTALL)
     if not match:
-        raise SystemExit("could not read __version__ from _version.py")
+        raise SystemExit("could not read the project version from pyproject.toml")
     return match.group(1)
 
 
