@@ -87,10 +87,6 @@ def dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-# ---------------------------------------------------------------------------------------------
-# Scalar conversions
-# ---------------------------------------------------------------------------------------------
-
 _INT_RANGES = {
     ByteType: (-(2**7), 2**7 - 1),
     ShortType: (-(2**15), 2**15 - 1),
@@ -203,7 +199,7 @@ def _decimal_converter(dt: DecimalType) -> Callable[[Any], Decimal]:
 
 
 def _parse_iso(value: str) -> tuple[datetime, bool]:
-    """Parse ISO-8601 (incl. 7-digit .NET fractions); returns (datetime, had_explicit_zone)."""
+    """Parse ISO-8601 (incl. 7-digit .NET fractions) into ``(datetime, had_explicit_zone)``."""
     m = _ISO_RE.match(value.strip())
     if not m:
         raise _ConversionFailure("string is not an ISO-8601 timestamp")
@@ -227,7 +223,7 @@ def _parse_iso(value: str) -> tuple[datetime, bool]:
 
 
 def _epoch_to_datetime(value: int | float) -> datetime:
-    """Epoch number -> aware UTC datetime. Magnitude selects seconds, milliseconds or microseconds."""
+    """Convert an epoch number to an aware UTC datetime; magnitude selects seconds, milliseconds or microseconds."""
     magnitude = abs(value)
     if magnitude < 1e11:
         seconds = float(value)
@@ -284,11 +280,6 @@ def _to_binary(value: Any) -> bytes:
         except (binascii.Error, ValueError):
             raise _ConversionFailure("string is not valid base64") from None
     raise _ConversionFailure(f"cannot convert {_type_name(value)} to binary")
-
-
-# ---------------------------------------------------------------------------------------------
-# Converter compilation
-# ---------------------------------------------------------------------------------------------
 
 
 def _lookup(doc: Mapping[str, Any], name: str) -> Any:
@@ -373,11 +364,6 @@ def _build_non_null_converter(dt: DataType) -> Callable[[Any], Any]:
     )
 
 
-# ---------------------------------------------------------------------------------------------
-# Row building
-# ---------------------------------------------------------------------------------------------
-
-
 class RecordView:
     """Values available to the row builder for one document / change event."""
 
@@ -460,7 +446,7 @@ class RowBuilder:
         self._width = len(self._fields)
 
     def build(self, view: RecordView) -> tuple[Any, ...] | None:
-        """Row tuple, or None when the record must be dropped (DROPMALFORMED)."""
+        """Return the row tuple, or None when the record must be dropped (DROPMALFORMED)."""
         out: list[Any] = [None] * self._width
         failed: list[tuple[str, str]] = []
         for index, spec in enumerate(self._fields):

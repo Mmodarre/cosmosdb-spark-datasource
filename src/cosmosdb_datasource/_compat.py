@@ -1,24 +1,24 @@
 """Bridge between the PySpark build that *runs* the data source and the one user code imports.
 
-On Databricks serverless (verified 2026-10-14, Spark 4.2.0 server, environment version 4) the
-Python data source workers run the engine's own PySpark, shipped as the package
-``_engine_pyspark`` (``__version__`` 4.4.0.dev0), while ``import pyspark`` in the *same* process
-resolves to the environment's client PySpark (databricks-connect, 4.0.0). Classes therefore exist
-twice and ``isinstance`` across the two copies is false. Two consequences are handled here:
+On Databricks serverless (Spark 4.2.0 server, environment version 4) the Python data source
+workers run the engine's own PySpark, shipped as the package ``_engine_pyspark`` (``__version__``
+4.4.0.dev0), while ``import pyspark`` in the *same* process resolves to the environment's client
+PySpark (databricks-connect, 4.0.0). Classes therefore exist twice and ``isinstance`` across the
+two copies is false. Two consequences are handled here:
 
-1. **Schemas.** The engine's batch planner converts the output schema to the client's classes
-   before calling ``DataSource.reader()``, but its streaming source runner passes an *engine*
-   ``StructType`` to ``DataSource.streamReader()``. :func:`local_struct_type` converts any foreign
-   ``StructType`` through its JSON form so the type checks in :mod:`cosmosdb_datasource.schema`
-   work.
-2. **Admission control.** The engine uses the PySpark 4.2+ protocol for every reader whose
-   ``latestOffset`` takes parameters: it calls ``getDefaultReadLimit()`` (serialized with
-   ``dataclasses.asdict`` plus the class *name*), ``latestOffset(start, limit)`` with its own
-   ``ReadLimit`` classes, ``reportLatestOffset()``, and, for ``Trigger.AvailableNow``, checks
-   ``isinstance(reader, SupportsTriggerAvailableNow)`` against its own mixin. Client PySpark 4.0
-   has none of these. The classes are taken from the engine module when the engine is loaded in
-   the process, then from ``pyspark``, then from local stand-ins with the same names and fields
-   (the wire format only carries the name and the fields).
+* **Schemas.** The engine's batch planner converts the output schema to the client's classes
+  before calling ``DataSource.reader()``, but its streaming source runner passes an *engine*
+  ``StructType`` to ``DataSource.streamReader()``. :func:`local_struct_type` converts any foreign
+  ``StructType`` through its JSON form so the type checks in :mod:`cosmosdb_datasource.schema`
+  work.
+* **Admission control.** The engine uses the PySpark 4.2+ protocol for every reader whose
+  ``latestOffset`` takes parameters: it calls ``getDefaultReadLimit()`` (serialized with
+  ``dataclasses.asdict`` plus the class *name*), ``latestOffset(start, limit)`` with its own
+  ``ReadLimit`` classes, ``reportLatestOffset()``, and, for ``Trigger.AvailableNow``, checks
+  ``isinstance(reader, SupportsTriggerAvailableNow)`` against its own mixin. Client PySpark 4.0
+  has none of these. The classes are taken from the engine module when the engine is loaded in
+  the process, then from ``pyspark``, then from local stand-ins with the same names and fields
+  (the wire format only carries the name and the fields).
 
 If no ``SupportsTriggerAvailableNow`` is found when :mod:`cosmosdb_datasource.stream` is imported,
 the reader gets a placeholder base and Spark treats it as a source without native AvailableNow
@@ -62,10 +62,10 @@ class ReadMaxRows:
 
 
 def streaming_api_module() -> ModuleType | None:
-    """The module defining the streaming admission-control API in the PySpark that runs us.
+    """Return the module defining the streaming admission-control API in the PySpark that runs the reader.
 
-    The engine module is preferred, but only when the engine package is already loaded: that is
-    the case inside Databricks data source workers, and importing it anywhere else is avoided.
+    The engine module is preferred only when the engine package is already loaded (inside Databricks
+    data source workers); importing it anywhere else is avoided.
     """
     if ENGINE_PACKAGE in sys.modules:
         try:
@@ -83,7 +83,7 @@ class NoTriggerAvailableNow:
 
 
 def available_now_base() -> type:
-    """``SupportsTriggerAvailableNow`` of the running engine, or the :class:`NoTriggerAvailableNow` placeholder."""
+    """Return the running engine's ``SupportsTriggerAvailableNow`` or the :class:`NoTriggerAvailableNow` placeholder."""
     module = streaming_api_module()
     base = getattr(module, "SupportsTriggerAvailableNow", None) if module is not None else None
     if isinstance(base, type):
@@ -92,7 +92,7 @@ def available_now_base() -> type:
 
 
 def describe_streaming_modules() -> str:
-    """Which PySpark builds and streaming API modules are loaded (for diagnostics; no imports)."""
+    """Describe which PySpark builds and streaming API modules are loaded (for diagnostics; no imports)."""
     parts = []
     for name in (ENGINE_PACKAGE, ENGINE_STREAMING_MODULE, CLIENT_PACKAGE, CLIENT_STREAMING_MODULE):
         module = sys.modules.get(name)
@@ -114,9 +114,9 @@ _warned_available_now = False
 
 
 def warn_if_available_now_unsupported(base: type, caller: str) -> bool:
-    """Log a WARNING (once per process) if Spark speaks admission control to a placeholder-based reader.
+    """Log a WARNING once per process if Spark speaks admission control to a placeholder-based reader.
 
-    Returns True if the warning was logged by this call.
+    Return True if this call logged it.
     """
     global _warned_available_now
     if _warned_available_now or base is not NoTriggerAvailableNow:
@@ -134,7 +134,7 @@ def warn_if_available_now_unsupported(base: type, caller: str) -> bool:
 
 
 def read_limit(max_rows: int | None) -> Any:
-    """``ReadMaxRows(max_rows)`` or ``ReadAllAvailable()`` using the running engine's classes."""
+    """Return ``ReadMaxRows(max_rows)`` or ``ReadAllAvailable()`` using the running engine's classes."""
     module = streaming_api_module()
     if max_rows:
         cls = getattr(module, "ReadMaxRows", None) if module is not None else None

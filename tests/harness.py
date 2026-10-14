@@ -68,18 +68,19 @@ class StreamHarness:
         self.committed: str | None = None
         self.batches: list[list[tuple]] = []
 
-    # -- lifecycle --------------------------------------------------------------------------
     def start(self) -> str:
-        """Fresh query. PySpark 4.0/4.1 call latestOffset() before initialOffset() here
-        (MicroBatchExecution.constructNextBatch, then initialOffset when building the batch);
-        4.2 with admission control calls initialOffset() first."""
+        """Start a fresh query.
+
+        PySpark 4.0/4.1 call latestOffset() before initialOffset() here (MicroBatchExecution.constructNextBatch,
+        then initialOffset when building the batch); 4.2 with admission control calls initialOffset() first.
+        """
         if not self.admission_control:
             self.planner.latestOffset()
         self.committed = json.dumps(self.planner.initialOffset())
         return self.committed
 
     def restart(self) -> None:
-        """New query run on the same checkpoint (fresh Python processes)."""
+        """Restart the query on the same checkpoint (fresh Python processes)."""
         self.planner.stop()
         self.planner = _ship(self.ds).streamReader(self.schema)
         self._executor_blob = cloudpickle.dumps(_ship(self.ds).streamReader(self.schema))
@@ -105,7 +106,7 @@ class StreamHarness:
         return rows
 
     def run_batch(self, limit: Any = None) -> list[tuple] | None:
-        """One trigger. Returns None when Spark would not run a batch (offset unchanged)."""
+        """Run one trigger; return None when Spark would not run a batch (offset unchanged)."""
         assert self.committed is not None
         end = self.latest(limit)
         if end == self.committed:

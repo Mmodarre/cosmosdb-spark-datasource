@@ -73,7 +73,7 @@ def _parallel_map(fn: Callable[[_T], _R], items: Sequence[_T]) -> list[_R]:
 
 
 def allocate_budget(starts: Sequence[int], currents: Sequence[int], cap: int | None) -> list[int]:
-    """End LSN per range so that the total LSN advance across ranges is about ``cap``.
+    """Return the end LSN per range so that the total LSN advance across ranges is about ``cap``.
 
     This is an approximation of an item cap: one LSN usually holds one change, but bulk and
     transactional-batch writes commit many documents under a single LSN (observed: ~50 documents
@@ -164,7 +164,6 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         self._reported: Offset | None = None
         self._resolved_at: float | None = None  # monotonic time this process resolved the initial offset
 
-    # -- driver helpers -------------------------------------------------------------------
     def _context(self) -> tuple[Any, SecretToken | None, str, PartitionKeyInfo]:
         token = self._driver_token()
         backend = self._driver_backend(token)
@@ -201,7 +200,6 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         logger.warning("Read limit %s is not supported by the cosmosdb source; reading all available.", kind)
         return None
 
-    # -- DataSourceStreamReader -----------------------------------------------------------
     def initialOffset(self) -> dict:
         # Cached: on PySpark 4.0/4.1 a brand-new query calls latestOffset() first (which needs the
         # start) and initialOffset() later when building the batch; both must see the same start.
@@ -273,8 +271,8 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         self._reported = Offset(rid, mode, tuple(RangeState(r.lo, r.hi, max(r.lsn, c)) for r, c in observed))
         if base.initial and base.snapshot is not None:
             # First batch with an initial snapshot: it reads only the snapshot, so its change-feed end
-            # equals its start (no per-trigger budget or AvailableNow target applies). Change-feed rows
-            # start with batch 1. The end carries the original start ("init") and the snapshot record.
+            # equals its start (no per-trigger budget or AvailableNow target applies). The end carries
+            # the original start ("init") and the snapshot record.
             return Offset(rid, mode, base.ranges, init=base.ranges, snapshot=base.snapshot).to_dict()
         starts = [r.lsn for r in refined.ranges]
         ends = allocate_budget(starts, currents, self._cap(limit))
@@ -298,9 +296,9 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         return _compat.read_limit(self._opts.max_items_per_trigger)
 
     def reportLatestOffset(self) -> dict | None:  # admission-control protocol (PySpark >= 4.2, Databricks)
-        # Only used for the "latestOffset" in query progress. Returns the positions probed by the
-        # last latestOffset() call (no extra requests), or None before the first one. Defined here
-        # because the base class of client PySpark 4.0 lacks it while the engine still calls it.
+        # Only used for the "latestOffset" in query progress, so it reuses the positions probed by the
+        # last latestOffset() call (no extra requests). Defined here because the base class of client
+        # PySpark 4.0 lacks it while the engine still calls it.
         return self._reported.to_dict() if self._reported is not None else None
 
     def prepareForTriggerAvailableNow(self) -> None:  # PySpark >= 4.2 only
@@ -350,7 +348,6 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         logger.info("cosmosdb micro-batch planned: %d partition(s)", len(parts))
         return parts
 
-    # -- initial snapshot (driver) --------------------------------------------------------------
     def _log_snapshot_decision(self, start: Offset, end: Offset) -> None:
         pending, planned = start.snapshot is not None, end.snapshot is not None
         if pending and not planned:
@@ -401,7 +398,6 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
             logger.info("cosmosdb: waiting %.1fs before reading the initial snapshot", remaining)
             retry.sleep(remaining)
 
-    # -- executor -------------------------------------------------------------------------------
     def read(self, partition: InputPartition | None) -> Iterator[tuple[Any, ...]]:
         if partition is None:
             return

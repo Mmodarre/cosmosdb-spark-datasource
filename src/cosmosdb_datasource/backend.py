@@ -46,7 +46,7 @@ class QueryPage:
 
 
 def feed_range_dict(lo: str, hi: str) -> dict[str, Any]:
-    """Feed range in the dict form accepted by ``feed_range=`` (``FeedRangeInternalEpk.to_dict``)."""
+    """Return the feed range in the dict form accepted by ``feed_range=`` (``FeedRangeInternalEpk.to_dict``)."""
     return {"Range": {"min": lo, "max": hi, "isMinInclusive": True, "isMaxInclusive": False}}
 
 
@@ -79,7 +79,6 @@ class SdkBackend:
     def _kwargs(self) -> dict[str, Any]:
         return {"priority": self._priority} if self._priority else {}
 
-    # -- metadata -------------------------------------------------------------------------
     def properties(self, refresh: bool = False) -> dict[str, Any]:
         if self._properties is None or refresh:
             self._properties = dict(self._container.read())
@@ -116,7 +115,6 @@ class SdkBackend:
             raise CosmosDataSourceError(f"Feed ranges returned by the service do not tile the key space: {ranges}")
         return ranges
 
-    # -- batch ----------------------------------------------------------------------------
     def query_pages(
         self,
         query: str,
@@ -126,7 +124,7 @@ class SdkBackend:
         continuation: str | None = None,
         session_token: str | None = None,
     ) -> Iterator[QueryPage]:
-        """Query pages of ``rng``.
+        """Yield the query pages of ``rng``.
 
         ``session_token`` (Session consistency only; the SDK drops it for other levels) makes the
         service serve every page from a replica that has applied at least that session's writes;
@@ -156,7 +154,6 @@ class SdkBackend:
             charges.clear()
             yield QueryPage(items=items, continuation=pages.continuation_token, request_charge=charge)
 
-    # -- change feed ----------------------------------------------------------------------
     def change_feed_pages(
         self,
         rng: tuple[str, str],
@@ -224,7 +221,7 @@ class SdkBackend:
         return first, lsns, positions, ",".join(sessions) or None
 
     def current_lsn(self, rng: tuple[str, str], mode: str) -> int:
-        """Position of "now": the etag of an HTTP 304 for ``start_time="Now"`` (no data read).
+        """Return the position of "now": the etag of an HTTP 304 for ``start_time="Now"`` (no data read).
 
         If the range spans several physical partitions (split race) the minimum is returned,
         which is a valid bound for every child.
@@ -238,11 +235,11 @@ class SdkBackend:
         return min(lsns), session
 
     def resolve_start(self, rng: tuple[str, str], mode: str, start: str | datetime) -> tuple[int, str | None]:
-        """Exclusive LSN to start from for Beginning / Now / a point in time, and a session token.
+        """Return the exclusive LSN to start from for Beginning / Now / a point in time, and a session token.
 
-        The session token is the one returned with the probe response (verified (service): for a
-        ``Now`` probe its LSN equals the etag LSN, e.g. ``0:-1#6`` with etag ``"6"``). It is None if
-        the response carried none.
+        The session token is the one returned with the probe response, or None if it carried none
+        (verified against the service: for a ``Now`` probe its LSN equals the etag LSN, e.g.
+        ``0:-1#6`` with etag ``"6"``).
         """
         if start == "Now":
             return self._now(rng, mode)

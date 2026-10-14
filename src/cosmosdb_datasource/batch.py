@@ -55,7 +55,7 @@ class CosmosQueryPartition(InputPartition):
 def split_feed_ranges(
     ranges: Sequence[tuple[str, str]], splits: int, pk: PartitionKeyInfo
 ) -> list[tuple[tuple[str, str], tuple[str, str]]]:
-    """``(feed range, sub-range)`` pairs: every feed range EPK-split into ``splits`` sub-ranges."""
+    """Return ``(feed range, sub-range)`` pairs: every feed range EPK-split into ``splits`` sub-ranges."""
     out: list[tuple[tuple[str, str], tuple[str, str]]] = []
     for lo, hi in ranges:
         out.extend(((lo, hi), sub) for sub in epk.split_range(lo, hi, splits, kind=pk.kind, version=pk.version))
@@ -81,7 +81,7 @@ def query_documents(
     describe: str,
     session_token: str | None = None,
 ) -> Iterator[Any]:
-    """Every result of ``query`` over ``rng``, page by page.
+    """Yield every result of ``query`` over ``rng``, page by page.
 
     After the SDK's own retries are exhausted, transient errors resume from the last fully consumed
     page's continuation, so no result is yielded twice and none is skipped. Partition splits during

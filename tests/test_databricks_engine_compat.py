@@ -1,13 +1,13 @@
 """Regression tests for Databricks serverless, where the engine PySpark differs from ``pyspark``.
 
-Observed on serverless (2026-10-14): data source workers run ``_engine_pyspark`` 4.4.0.dev0 while
+Observed on serverless: data source workers run ``_engine_pyspark`` 4.4.0.dev0 while
 ``import pyspark`` resolves to the environment's client PySpark 4.0.0. The streaming runner then
 
-* passes an engine ``StructType`` to ``DataSource.streamReader()`` (failed with
+* passes an engine ``StructType`` to ``DataSource.streamReader()`` (left unconverted, it fails with
   ``Spark type string is not supported by the cosmosdb source``), and
 * speaks the 4.2+ admission-control protocol: ``getDefaultReadLimit()`` serialized as
   ``dataclasses.asdict(limit) | {"_type": name}``, ``latestOffset(start, engine_limit)``,
-  ``reportLatestOffset()`` (failed with ``AttributeError``) and
+  ``reportLatestOffset()`` (``AttributeError`` unless the reader defines it) and
   ``isinstance(reader, engine SupportsTriggerAvailableNow)``.
 """
 
@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def foreign_types_module() -> types.ModuleType:
-    """A second, independent copy of ``pyspark.sql.types`` (like ``_engine_pyspark.sql.types``)."""
+    """Load a second, independent copy of ``pyspark.sql.types`` (like ``_engine_pyspark.sql.types``)."""
     spec = importlib.util.spec_from_file_location("_foreign_engine_types", client_types.__file__)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -64,7 +64,7 @@ def test_stream_reader_accepts_engine_struct_type(make_store) -> None:
     foreign = foreign_types_module()
     engine_schema = foreign._parse_datatype_json_string(change_feed_schema().json())
     ds = make_source(fake_options(store, change_feed_mode="LatestVersion"))
-    reader = ds.streamReader(engine_schema)  # raised CosmosConfigError before the fix
+    reader = ds.streamReader(engine_schema)
     assert isinstance(reader._schema, client_types.StructType)
     assert reader._schema == change_feed_schema()
 
@@ -116,7 +116,7 @@ def test_read_limits_without_any_streaming_api(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_placeholder_base_warns_once_when_admission_control_is_used(make_store, monkeypatch, caplog) -> None:
-    """L2: the engine speaks admission control, but no SupportsTriggerAvailableNow was found at import."""
+    """The engine speaks admission control, but no SupportsTriggerAvailableNow was found at import."""
     from cosmosdb_datasource import stream as stream_module
 
     monkeypatch.setattr(_compat, "_warned_available_now", False)
@@ -228,8 +228,6 @@ def test_report_latest_offset(make_store) -> None:
     assert all(head[k] >= capped[k] for k in head)
     assert sum(head.values()) > sum(capped.values())
 
-
-# -- full engine-protocol simulation in a clean interpreter --------------------------------------
 
 _ENGINE_STREAMING_SOURCE = """
 from abc import ABC, abstractmethod
@@ -362,8 +360,7 @@ def test_engine_admission_control_protocol_with_client_pyspark_40(tmp_path: Path
 
 @pytest.mark.parametrize("start_from", ["Beginning", "Now"])
 def test_engine_protocol_available_now_with_initial_snapshot(tmp_path: Path, start_from: str) -> None:
-    """AvailableNow under the engine protocol: the snapshot is batch 0 (uncapped), the target is reached, and
-    the run terminates.
+    """AvailableNow under the engine protocol: uncapped snapshot in batch 0, target reached, run terminates.
 
     The simulation captures the target after 200 documents, before ``initialOffset()`` (as Spark does), and
     writes 30 more documents in between, so the snapshot holds all 230 documents. From Beginning the change

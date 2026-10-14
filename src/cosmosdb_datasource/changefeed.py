@@ -47,7 +47,7 @@ def format_etag(lsn: int) -> str:
 
 
 def parse_etag_lsn(etag: Any) -> int:
-    """LSN carried by a change-feed etag such as ``"1234"`` (quotes included)."""
+    """Return the LSN carried by a change-feed etag such as ``"1234"`` (quotes included)."""
     if etag is None:
         raise CosmosChangeFeedError("Change feed response did not carry an etag.")
     text = str(etag).strip().strip('"').strip()
@@ -65,7 +65,7 @@ class Position:
 
 
 def build_composite_continuation(container_rid: str, mode: str, lo: str, hi: str, children: list[Position]) -> str:
-    """Continuation for ``[lo, hi)`` with one child token per sub-range (each after its LSN)."""
+    """Build a continuation for ``[lo, hi)`` with one child token per sub-range (each after its LSN)."""
     start_from = "Now" if mode == MODE_ALL_VERSIONS_AND_DELETES else "Beginning"
     state = {
         "v": "v2",
@@ -86,12 +86,12 @@ def build_composite_continuation(container_rid: str, mode: str, lo: str, hi: str
 
 
 def build_continuation(container_rid: str, mode: str, lo: str, hi: str, lsn: int) -> str:
-    """Single-range continuation that resumes the change feed of ``[lo, hi)`` after ``lsn``."""
+    """Build a single-range continuation that resumes the change feed of ``[lo, hi)`` after ``lsn``."""
     return build_composite_continuation(container_rid, mode, lo, hi, [Position(lo, hi, lsn)])
 
 
 def clip_positions(positions: list[Position], previous: list[Position], lo: str, hi: str) -> list[Position]:
-    """Children clipped to ``[lo, hi)``, positioned at the LSNs held *before* the offending page.
+    """Clip children to ``[lo, hi)``, positioned at the LSNs held *before* the offending page.
 
     After a split, azure-cosmos replaces a sub-range token by tokens for the *full* child
     partitions (``FeedRangeCompositeContinuation.handle_feed_range_gone`` uses
@@ -123,7 +123,7 @@ def _outside(positions: list[Position], lo: str, hi: str) -> bool:
 
 
 def decode_positions(token: str | None) -> list[Position]:
-    """Per-physical-range positions inside an SDK-produced composite continuation token."""
+    """Decode the per-physical-range positions inside an SDK-produced composite continuation token."""
     if not token:
         return []
     try:

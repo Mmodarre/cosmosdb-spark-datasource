@@ -41,7 +41,6 @@ class CosmosReaderBase:
         self._schema = schema
         self._stream = stream
 
-    # -- driver side ----------------------------------------------------------------------
     def _driver_token(self) -> SecretToken | None:
         return mint_driver_token(self._opts.auth, self._opts.endpoint)
 
@@ -49,7 +48,7 @@ class CosmosReaderBase:
         return client.get_backend(self._opts, token)
 
     def _driver_call(self, what: str, fn: Callable[[], _T]) -> _T:
-        """A driver-side metadata request, retried on transient errors (throttling, timeouts, 5xx)."""
+        """Run a driver-side metadata request, retried on transient errors (throttling, timeouts, 5xx)."""
         return call_with_retry(fn, self._retry_policy(), what)
 
     def _splits_per_range(self, backend: Any, n_ranges: int) -> int:
@@ -74,7 +73,6 @@ class CosmosReaderBase:
         )
         return splits
 
-    # -- executor side --------------------------------------------------------------------
     def _backend(self, token: SecretToken | None) -> Any:
         return client.get_backend(self._opts, token)
 

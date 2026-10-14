@@ -63,11 +63,11 @@ def live_ids(store) -> list[str]:
     return sorted(d["id"] for d in store.live_documents())
 
 
-# -- the merge rule documented in the README ---------------------------------------------------
-
-
 def merge(rows: list[dict], sabotage: str | None = None) -> dict[tuple, dict]:
-    """Latest row per (pk, id) by ``struct(operation <> 'snapshot', _ts, lsn)``; deletes mean absence."""
+    """Apply the merge rule documented in the README.
+
+    Latest row per (pk, id) by ``struct(operation <> 'snapshot', _ts, lsn)``; deletes mean absence.
+    """
     if sabotage == "drop_snapshot":
         rows = [r for r in rows if r["operation"] != "snapshot"]
     elif sabotage == "drop_changes":
@@ -95,9 +95,6 @@ def merge(rows: list[dict], sabotage: str | None = None) -> dict[tuple, dict]:
 
 def truth(store) -> dict[tuple, dict]:
     return {(d["pk"], d["id"]): d for d in store.live_documents()}
-
-
-# -- batch 0 composition ------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("mode", [LV, AVAD])
@@ -189,9 +186,6 @@ def test_batch_zero_of_an_empty_container(make_store) -> None:
     assert [(r["id"], r["operation"]) for r in dicts(h, h.run_batch())] == [("late", "create")]
 
 
-# -- ordering: P0 is resolved and logged before the snapshot is read ----------------------------
-
-
 def test_start_is_resolved_and_logged_before_any_snapshot_page(make_store) -> None:
     store = make_store(partitions=3)
     load(store, 90)
@@ -234,9 +228,6 @@ def test_pyspark_40_call_order_latest_before_initial(make_store) -> None:
     h.committed = end
     rest = dicts(h, h.run_until_idle())
     assert sorted((r["id"], r["operation"]) for r in rest) == [(f"d{i}", "create") for i in (25, 26, 27)]
-
-
-# -- replay and restart -------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("ac", [False, True])
@@ -320,13 +311,13 @@ def test_replay_keeps_the_snapshot_decision_of_the_logged_batch(make_store, capl
 def test_offsets_without_the_snapshot_field_mean_no_snapshot(make_store, caplog) -> None:
     store = make_store(partitions=2)
     load(store, 20)
-    old = StreamHarness(fake_options(store, change_feed_mode=AVAD))  # what 0.1.x wrote
+    old = StreamHarness(fake_options(store, change_feed_mode=AVAD))  # offsets without the snapshot field
     old_start = old.start()
     old_end = old.latest()
     assert '"snapshot"' not in old_start and '"snapshot"' not in old_end
     parsed = offset(old_end)
     assert parsed.snapshot is None and json.dumps(parsed.to_dict()) == old_end  # byte-stable
-    # An uncommitted 0.1.x batch 0 replayed with initial_snapshot=true: no snapshot, and a warning.
+    # An uncommitted batch 0 without the field, replayed with initial_snapshot=true: no snapshot, and a warning.
     h = snap(store)
     h.committed = old_end
     h.restart()
@@ -336,14 +327,11 @@ def test_offsets_without_the_snapshot_field_mean_no_snapshot(make_store, caplog)
         parts = h.planner.partitions(json.loads(replay_start), json.loads(old_end))
     assert not any(isinstance(p, CosmosSnapshotPartition) for p in parts)  # ...but not planned
     assert "planned without a snapshot" in caplog.text
-    # Committed 0.1.x offsets as batch starts never produce snapshot rows.
+    # Committed offsets without the field never produce snapshot rows as batch starts.
     h.planner.commit(json.loads(old_end))
     load(store, 3, start=20)
     rows = h.run_until_idle()
     assert ids(h, rows) == ["d20", "d21", "d22"] and "snapshot" not in ops(h, rows)
-
-
-# -- admission control and Trigger.AvailableNow -------------------------------------------------
 
 
 @needs_42
@@ -396,9 +384,6 @@ def test_available_now_reaches_the_target_after_the_snapshot_and_terminates(make
     h.restart()  # next AvailableNow run
     h.planner.prepareForTriggerAvailableNow()
     assert ids(h, h.run_until_idle(ReadMaxRows(5))) == sorted(f"d{i}" for i in range(70, 80))
-
-
-# -- planning ---------------------------------------------------------------------------------
 
 
 def test_snapshot_partitions_follow_partitions_per_feed_range(make_store, monkeypatch) -> None:
@@ -466,9 +451,6 @@ def test_split_during_the_snapshot_query(make_store) -> None:
     assert len(rows) == len(set(h.column(rows, "id"))) == 150
 
 
-# -- replica freshness ------------------------------------------------------------------------
-
-
 def test_session_token_keeps_a_lagging_replica_from_serving_the_snapshot(make_store, no_sleep, monkeypatch) -> None:
     def scenario(pinned: bool) -> tuple[dict, dict, int]:
         store = make_store(partitions=2)
@@ -530,9 +512,6 @@ def test_snapshot_waits_for_the_delay_after_the_start_was_resolved(make_store, m
     assert events == []
 
 
-# -- options --------------------------------------------------------------------------------
-
-
 def test_initial_snapshot_with_start_from_beginning_is_legal_but_redundant(make_store, caplog) -> None:
     store = make_store(partitions=2)
     load(store, 30)
@@ -562,9 +541,6 @@ def test_initial_snapshot_options(make_store) -> None:
     with pytest.raises(CosmosConfigError, match="not supported for streaming"):
         q = make_source(fake_options(store, initial_snapshot="true", query="SELECT * FROM c WHERE c.v > 1"))
         q.streamReader(q.schema())
-
-
-# -- property-style convergence ---------------------------------------------------------------
 
 
 class Workload:
@@ -667,9 +643,6 @@ def test_convergence_check_detects_a_sabotaged_merge(make_store, mode: str) -> N
             if merge(rows, sabotage) != expected
         ]
         assert mismatches, f"sabotage {sabotage!r} went unnoticed for every seed"
-
-
-# -- driver-side retries ----------------------------------------------------------------------
 
 
 def test_driver_metadata_calls_retry_throttling(make_store, no_sleep) -> None:
