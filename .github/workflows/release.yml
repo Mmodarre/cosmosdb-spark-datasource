@@ -40,7 +40,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           version="${TAG#v}"
-          project_version="$(uv version --short)"
+          project_version="$(uv version --short --color never)"
           if [ "$version" != "$project_version" ]; then
             echo "::error::Tag $TAG does not match the version in pyproject.toml ($project_version)."
             exit 1
