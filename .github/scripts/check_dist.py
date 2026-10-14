@@ -22,7 +22,8 @@ PACKAGE = "cosmosdb_datasource"
 DIST_NAME = "cosmosdb_spark_datasource"
 ROOT = Path(__file__).resolve().parents[2]
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+")
-SDIST_ALLOWED = re.compile(rf"^(PKG-INFO|README\.md|pyproject\.toml|LICENSE[^/]*|src(/{PACKAGE}(/.*)?)?)$")
+# Newer uv releases write a normalized pyproject.toml into the sdist and keep the original as pyproject.toml.orig.
+SDIST_ALLOWED = re.compile(rf"^(PKG-INFO|README\.md|pyproject\.toml(\.orig)?|LICENSE[^/]*|src(/{PACKAGE}(/.*)?)?)$")
 
 
 def source_version() -> str:
