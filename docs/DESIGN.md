@@ -472,6 +472,20 @@ with the fake.
 - If no `SupportsTriggerAvailableNow` was found when `stream.py` was imported, the reader gets the `NoTriggerAvailableNow` placeholder and Spark would treat AvailableNow as a single batch. On PySpark 4.0/4.1 that is expected and silent (they never call the protocol). If `getDefaultReadLimit()` or `latestOffset(start, limit)` is called with the placeholder in place, a WARNING is logged once per process, naming the loaded streaming modules (`_compat.describe_streaming_modules`).
 - `reportLatestOffset()` returns the unclamped positions probed by the last `latestOffset()` call. It is reporting only, and makes no extra requests.
 
+### Change feed as a batch read
+
+`CosmosChangeFeedBatchReader` holds a `CosmosStreamReader` and uses its planning and read: the start
+is `initialOffset()` (or the end of the last committed range of the checkpoint), the end is planned
+like `latestOffset` on PySpark 4.0 (re-key, probe, `allocate_budget` with `max_items_per_trigger`) or,
+with `end_at`, the LatestVersion position before that time per range (`resolve_start(T)`), and
+`partitions(start, end)` and `read()` are the stream's, so batch rows equal stream rows and inherit
+the determinism argument. The checkpoint (`batch_checkpoint.py`) writes `offsets/<n>` (start, end,
+`caught_up`) with an atomic rename before the read, and `commit_batch_checkpoint` writes
+`commits/<n>`. While the latest range is uncommitted every read plans that range again, which is the
+replay rule of a stream's offset log; Spark offers a batch read no callback after its output was
+written, so the job commits. `caught_up` (every range reached its target) ends a capped loop, which
+splits a backlog on PySpark 4.0 and 4.1, where `Trigger.AvailableNow` runs one capped micro-batch.
+
 ### Per-trigger limits
 
 - **PySpark 4.0/4.1**: `max_items_per_trigger` caps the **LSN advance**, allocated proportionally to lag with >= 1 per lagging range. It is an LSN budget, not a row cap: bulk or transactional writes put many changes under one LSN (observed: a budget of 200 gave batches of about 2,158 rows, about 10.8×; bulk-loaded data held up to about 50 documents per LSN). With `Trigger.AvailableNow`, Spark's wrapper calls `latestOffset()` once, so the run processes **one capped batch** and stops; the next run continues.
@@ -512,7 +526,7 @@ Spark gives `schema()` no batch/stream signal. Therefore:
 - `snapshot_stream=true` selects the snapshot-stream schema (the batch schema plus `snapshot_ts`).
 - Otherwise, if any change-feed option (`change_feed_mode`, `start_from`, `max_items_per_trigger`, `initial_snapshot`, `initial_snapshot_delay_seconds`) is present, the default schema is the change-feed schema; otherwise it is the batch schema.
 - `readStream` with the batch default schema fails with an actionable message.
-- A batch read with change-feed options fails.
+- A batch read with change-feed options reads the change feed (`changefeed_batch.py`), except with `initial_snapshot` or `snapshot_stream`, which fail.
 - With an explicit `.schema(...)`, a stream defaults to LatestVersion.
 
 Virtual columns:

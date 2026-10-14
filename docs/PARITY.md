@@ -18,9 +18,9 @@ source).
 
 | Status | Rows |
 |---|---|
-| Supported | 24 |
+| Supported | 25 |
 | Partially | 11 |
-| Missing | 6 |
+| Missing | 5 |
 | N/A | 4 |
 | Not verified | 1 |
 
@@ -66,9 +66,9 @@ source).
 | AllVersionsAndDeletes | `FullFidelity` / `AllVersionsAndDeletes` (documented as experimental) | **Supported**: `change_feed_mode=AllVersionsAndDeletes`, LSN-bounded, replayable micro-batches | Both returned identical changes in the benchmark. |
 | Start position | `spark.cosmos.changeFeed.startFrom` `Beginning` / `Now` / point in time | **Supported**: `start_from` `Beginning` / `Now` / ISO-8601 (AllVersionsAndDeletes: `Now`) | A checkpoint wins in both. |
 | Initial snapshot with CDC in one stream | none | **Supported**: `initial_snapshot=true` | This data source only. |
-| Items per micro-batch | `spark.cosmos.changeFeed.itemCountPerTriggerHint` | **Partially**: `max_items_per_trigger`, a budget of LSNs | On Spark 4.0 / 4.1 a capped `Trigger.AvailableNow` run is one micro-batch (the connector's hint gave one batch of all changes). |
+| Items per micro-batch | `spark.cosmos.changeFeed.itemCountPerTriggerHint` | **Partially**: `max_items_per_trigger`, a budget of LSNs | On Spark 4.0 / 4.1 a capped `Trigger.AvailableNow` run is one micro-batch (the connector's hint gave one batch of all changes); a loop of capped batch reads with a checkpoint works through a backlog there. |
 | Streaming checkpoints | `checkpointLocation` | **Supported** | |
-| Change feed as a batch read | `spark.read.format("cosmos.oltp.changeFeed")`, `spark.cosmos.changeFeed.batchCheckpointLocation` | **Missing** | |
+| Change feed as a batch read | `spark.read.format("cosmos.oltp.changeFeed")`, `spark.cosmos.changeFeed.batchCheckpointLocation` | **Supported**: `spark.read` with change-feed options; `end_at`; `batch_checkpoint_location` with `commit_batch_checkpoint()` | A read replays its range until the job commits it, and reports whether it caught up, so capped reads in a loop work through a backlog on Spark 4.0 and 4.1. |
 | Adaptive micro-batch sizing | `spark.cosmos.changeFeed.performance.monitoring.enabled` | **Missing** | |
 | Spark 2 offset migration | UDFs `CreateChangeFeedOffsetFromSpark2`, ... | **N/A** | |
 

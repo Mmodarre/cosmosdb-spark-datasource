@@ -386,6 +386,21 @@ def test_partition_key_item_ids_and_read_many_function(seeded) -> None:
     assert sorted(pa.Table.from_batches(list(read(iter([batch])))).column("id").to_pylist()) == ["d5", "d6"]
 
 
+def test_change_feed_batch_read_with_a_checkpoint(make_container, tmp_path: Path) -> None:
+    from cosmosdb_datasource import commit_batch_checkpoint
+
+    name, container = make_container()
+    write(container, 0, 40)
+    location = str(tmp_path / "cf")
+    opts = options(name, change_feed_mode="LatestVersion", batch_checkpoint_location=location)
+    first, _ = run_batch(opts)
+    assert sorted(r[0] for r in first) == sorted(f"d{i}" for i in range(40))
+    assert commit_batch_checkpoint(location)
+    write(container, 40, 5)
+    second, _ = run_batch(opts)
+    assert sorted(r[0] for r in second) == sorted(f"d{i}" for i in range(40, 45))
+
+
 @requires("requires_epk_ranges")
 def test_batch_epk_sub_split_hash_v1(make_container) -> None:
     name, container = make_container(version=1)
