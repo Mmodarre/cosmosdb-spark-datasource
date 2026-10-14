@@ -7,7 +7,8 @@ SDK-specific behaviour in one place:
 * ``quota()``                      ``x-ms-resource-usage`` sizes, if reported
 * ``feed_ranges(force_refresh)``   physical partition EPK ranges, sorted
 * ``query_pages(...)``             query pages for one EPK range, resumable by continuation,
-                                   optionally pinned to a session token
+                                   optionally pinned to a session token; each page names the
+                                   physical partitions that served it
 * ``change_feed_pages(...)``       change-feed pages for one EPK range from an LSN, resumable
 * ``current_lsn(rng, mode)``       current change-feed position without reading data
 * ``resolve_start(rng, mode, s)``  LSN position for Beginning / Now / a timestamp, plus the session
@@ -20,6 +21,7 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 from cosmosdb_datasource import epk
@@ -36,6 +38,7 @@ from cosmosdb_datasource.options import MODE_LATEST_VERSION
 logger = logging.getLogger("cosmosdb_datasource")
 
 SESSION_TOKEN_HEADER = "x-ms-session-token"
+PARTITION_KEY_RANGE_HEADER = "x-ms-documentdb-partitionkeyrangeid"
 
 
 @dataclass
@@ -43,6 +46,16 @@ class QueryPage:
     items: list[dict[str, Any]]
     continuation: str | None
     request_charge: float = 0.0
+    partitions: tuple[str, ...] = ()  # partition key range ids of the responses that make up the page
+    server_time: float | None = None  # epoch seconds, from the first response's Date header
+
+
+def _server_time(headers: Any) -> float | None:
+    try:
+        value = headers.get("Date") or headers.get("date")
+        return parsedate_to_datetime(value).timestamp() if value else None
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def feed_range_dict(lo: str, hi: str) -> dict[str, Any]:
@@ -131,9 +144,15 @@ class SdkBackend:
         otherwise it answers 404/1002, which the SDK and :mod:`cosmosdb_datasource.retry` retry.
         """
         charges: list[float] = []
+        served: list[str] = []
+        times: list[float | None] = []
 
         def hook(headers: Any, _body: Any) -> None:
             charges.append(_charge(headers))
+            pk_range = headers.get(PARTITION_KEY_RANGE_HEADER)
+            if pk_range and str(pk_range) not in served:
+                served.append(str(pk_range))
+            times.append(_server_time(headers))
 
         kwargs: dict[str, Any] = dict(self._kwargs())
         if parameters:
@@ -150,9 +169,16 @@ class SdkBackend:
         pages = pager.by_page(continuation_token=continuation) if continuation else pager.by_page()
         for page in pages:
             items = list(page)
-            charge = sum(charges)
+            yield QueryPage(
+                items=items,
+                continuation=pages.continuation_token,
+                request_charge=sum(charges),
+                partitions=tuple(served),
+                server_time=next((t for t in times if t is not None), None),
+            )
             charges.clear()
-            yield QueryPage(items=items, continuation=pages.continuation_token, request_charge=charge)
+            served.clear()
+            times.clear()
 
     def change_feed_pages(
         self,

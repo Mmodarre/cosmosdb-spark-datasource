@@ -9,8 +9,12 @@ semantics:
 * change-feed reads resume after an LSN, report per-child positions in an SDK-format composite
   continuation token, round-robin over children after a split, and return a drained page (HTTP
   304) carrying the partition's current LSN,
-* queries page by a resume key (like the service's continuation), so a document that is not
-  modified during a query is returned exactly once even while other documents change,
+* queries return documents in ``_rid`` order and resume after the last ``_rid`` (as the service
+  does), so a document that is not modified during a query is returned exactly once, a replaced
+  document keeps its place, and a deleted and re-created document comes again at the end,
+* a split while a query runs is handled like azure-cosmos 4.17.1 (the range restarts from its
+  beginning if it now spans several partitions, or continues on the single child) or, with
+  ``query_split="raise"``, like 4.14.0 (HTTP 410/1002); every page names the partitions that served it,
 * session tokens (``"<partition id>:-1#<lsn>"``, the format observed on the service) on start
   probes; a query carrying one is served only by a replica at or beyond that LSN (else 404/1002,
   as verified against the service), with the token of a split parent applying to its children,
@@ -67,6 +71,7 @@ class Version:
     ts: int
     doc: dict[str, Any] | None
     ttl_expired: bool = False
+    rid: int = 0  # a document incarnation's _rid: kept by replaces, new for a create or re-create
 
 
 @dataclass
@@ -101,6 +106,8 @@ class FakeCosmosStore:
         self.clock = clock
         self.clock_step = 1  # 0 makes consecutive writes share a _ts second, as on the service
         self.next_partition_id = len(self.partitions)
+        self.next_rid = 1
+        self.query_split = "restart"  # "restart" (azure-cosmos 4.17.1) or "raise" (4.14.0)
         # Fault injection
         self.throttle_next = 0
         self.throttle_calls: dict[str, int] = {}  # method name -> number of 429s to raise
@@ -178,7 +185,6 @@ class FakeCosmosStore:
             body = dict(doc)
             body.update(
                 {
-                    "_rid": "r" + doc["id"],
                     "_self": "s",
                     "_etag": f'"{uuid.uuid4()}"',
                     "_attachments": "a/",
@@ -186,7 +192,12 @@ class FakeCosmosStore:
                 }
             )
             op = "create" if prev is None or prev.op == "delete" else "replace"
-            version = Version(part.lsn, op, doc["id"], pk, key, self.clock, body)
+            if op == "create":
+                rid, self.next_rid = self.next_rid, self.next_rid + 1
+            else:
+                rid = prev.rid  # type: ignore[union-attr]
+            body["_rid"] = f"r{rid}"
+            version = Version(part.lsn, op, doc["id"], pk, key, self.clock, body, rid=rid)
             part.log.append(version)
             self.save()
             return version
@@ -351,39 +362,67 @@ class FakeBackend:
     def query_pages(
         self, query, parameters, rng, page_size, continuation=None, session_token=None
     ) -> Iterator[QueryPage]:
-        """Serve ``SELECT *`` pages; the continuation is the (EPK, id) key of the last returned document."""
+        """Serve ``SELECT *`` pages in ``_rid`` order; the continuation holds the last ``_rid`` returned.
+
+        A range that spans several partitions is read partition by partition, as the SDK does. If the
+        partition serving a single-partition range splits between two pages, the read continues on
+        the single child that now holds the range, or restarts from the beginning when the range spans
+        several children (azure-cosmos 4.17.1); with ``query_split="raise"`` it fails with 410/1002.
+        """
         lo, hi = rng
-        after = tuple(json.loads(continuation)) if continuation else None
+        after = json.loads(continuation)["rid"] if continuation else 0
+        serving: str | None = None  # the partition of a single-partition read
+        queue: list[list[Any]] | None = None  # [lo, hi, after] per partition of a multi-partition read
         while True:
             store = self._request("query_pages")
             if store._before_query_page is not None:
                 store._before_query_page()
             with _LOCK:
+                parts = store.overlapping(lo, hi)
+                gone = queue is None and serving is not None and serving not in {p.id for p in parts}
+                if gone and store.query_split == "raise":
+                    raise FakeHttpError(410, sub_status=1002)
+                if queue is None and len(parts) > 1:  # a single-partition continuation cannot be carried over
+                    queue = [[max(p.lo, lo), min(p.hi, hi), 0] for p in parts]
+                if queue is not None:
+                    q_lo, q_hi, q_after = queue[0]
+                    part = store.overlapping(q_lo, q_hi)[0]
+                else:
+                    q_lo, q_hi, q_after = lo, hi, after
+                    part = parts[0]
+                    serving = part.id
                 lagging = store.query_lag_requests > 0
                 if lagging:
                     store.query_lag_requests -= 1
-                docs = []
-                for p in store.overlapping(lo, hi):
-                    visible = p.lsn - store.query_lag_delta if lagging else p.lsn
-                    required = _required_lsn(session_token, p)
-                    if required is not None and visible < required:
-                        raise FakeHttpError(404, sub_status=1002)  # READ_SESSION_NOTAVAILABLE
-                    latest: dict[tuple[str, str], Version] = {}
-                    for v in p.log:
-                        if lo <= v.epk < hi and v.lsn <= visible:
-                            latest[(json.dumps(v.pk), v.id)] = v
-                    docs.extend(v for v in latest.values() if v.op != "delete")
-                docs.sort(key=lambda v: (v.epk, v.id))
-                if after is not None:
-                    docs = [v for v in docs if (v.epk, v.id) > after]
+                visible = part.lsn - store.query_lag_delta if lagging else part.lsn
+                required = _required_lsn(session_token, part)
+                if required is not None and visible < required:
+                    raise FakeHttpError(404, sub_status=1002)  # READ_SESSION_NOTAVAILABLE
+                latest: dict[tuple[str, str], Version] = {}
+                for v in part.log:
+                    if q_lo <= v.epk < q_hi and v.lsn <= visible:
+                        latest[(json.dumps(v.pk), v.id)] = v
+                docs = sorted((v for v in latest.values() if v.op != "delete" and v.rid > q_after), key=lambda v: v.rid)
                 page = docs[:page_size]
                 more = len(docs) > page_size
-                store.call_log.append(["query_page", lo, hi, session_token, len(page)])
-            if page:
-                after = (page[-1].epk, page[-1].id)
-            token = json.dumps(list(after)) if more and after is not None else None
-            yield QueryPage([dict(v.doc) for v in page], token, request_charge=2.5)
-            if not more:
+                store.call_log.append(["query_page", q_lo, q_hi, session_token, len(page)])
+                clock = store.clock
+            last = page[-1].rid if page else q_after
+            if queue is not None:
+                if more:
+                    queue[0][2] = last
+                else:
+                    queue.pop(0)
+                token = json.dumps({"queue": queue}) if queue else None
+                done = not queue
+            else:
+                after = last
+                token = json.dumps({"rid": after}) if more else None
+                done = not more
+            yield QueryPage(
+                [dict(v.doc) for v in page], token, request_charge=2.5, partitions=(part.id,), server_time=float(clock)
+            )
+            if done:
                 return
 
     def _entries(

@@ -28,6 +28,14 @@ First public release.
 
 ### Fixed
 
+- A partition split while a batch read, an initial snapshot or a snapshot stream was reading a
+  partition returned rows twice: azure-cosmos 4.17.1 restarts a split range from its beginning
+  (4.14.0 raises 410 and then misroutes the continuation). Every query is now scoped to one
+  physical partition, a split is detected from the partition that served each page, and the
+  children resume from the last page's continuation.
+- A document deleted and re-created during a query read was returned twice. Each `(pk, id)` is now
+  returned at most once per read; the keys are kept in bounded memory (8 bytes per document,
+  spilled to a temporary file beyond about 32 MiB).
 - With `initial_snapshot` and `Trigger.AvailableNow` (PySpark 4.2, Databricks), the first run ended
   after the snapshot, so the changes made while it was read waited for the next run. The run's
   target is now moved once after the snapshot, and the first run drains them.

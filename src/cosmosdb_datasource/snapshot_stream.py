@@ -219,6 +219,7 @@ class CosmosSnapshotStreamReader(CosmosReaderBase, DataSourceStreamReader, _Avai
             stats=stats,
             describe=describe,
             session_token=partition.session_token,
+            pk=partition.pk,
         )
         rows = 0
         for doc in docs:
@@ -244,6 +245,8 @@ class CosmosSnapshotStreamReader(CosmosReaderBase, DataSourceStreamReader, _Avai
             pages=stats.pages,
             request_charge=stats.request_charge,
             retries=stats.retries,
+            replans=stats.replans,
+            duplicates=stats.duplicates,
         )
 
     def commit(self, end: dict) -> None:

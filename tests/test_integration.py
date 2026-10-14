@@ -336,6 +336,32 @@ def test_batch_epk_sub_split_hash_v1(make_container) -> None:
     assert all(abs(s - mean) / mean < 0.5 for s in sizes), f"unbalanced V1 sub-split: {sizes}"
 
 
+def test_batch_read_returns_a_recreated_document_once(make_container, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A document deleted and re-created after the read returned it is a new document (new _rid) that the
+    scan reaches again; the read still returns its key once."""
+    from cosmosdb_datasource.backend import SdkBackend
+
+    name, container = make_container()
+    write(container, 0, 120)
+    original = SdkBackend.query_pages
+    pages: list[int] = []
+
+    def churn(self, *args, **kwargs):
+        for page in original(self, *args, **kwargs):
+            yield page
+            pages.append(len(page.items))
+            if len(pages) == 2:
+                for doc in page.items[:3]:  # already read
+                    container.delete_item(doc["id"], partition_key=doc["pk"])
+                    container.upsert_item({**document(int(doc["id"][1:])), "recreated": True})
+
+    monkeypatch.setattr(SdkBackend, "query_pages", churn)
+    rows, _ = run_batch(options(name, page_size=20))
+    keys = [(r[1], r[0]) for r in rows]
+    assert len(pages) > 2
+    assert len(keys) == len(set(keys)) == 120
+
+
 @pytest.fixture(scope="module")
 def multi_partition(sdk_db: Any) -> Iterator[tuple[str, Any, int]]:
     """Container with several physical partitions and 2000 documents."""

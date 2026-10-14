@@ -500,13 +500,21 @@ snapshots = spark.readStream.format("cosmosdb").options(**conn, container="custo
 - A projecting `query` (`SELECT c.id, c.status, c._ts FROM c`) cuts RU, bandwidth and JSON work
   when the whole document is not needed.
 - Set `preferred_regions` to the region closest to the Spark cluster.
-- `log_metrics=true` logs one line per partition with rows, pages, RU, retries and duration.
+- `log_metrics=true` logs one line per partition with rows, pages, RU, retries and duration
+  (for queries also `replans`, splits handled during the read, and `duplicates`, re-created
+  documents dropped).
+- A query read records 8 bytes per document it returns, to return each key at most once: in
+  memory up to about 32 MiB per task, beyond that in an anonymous temporary file (about 400 MB for
+  a task of 50 million documents).
 
 ## Limitations
 
 - Read-only: there is no writer.
-- Batch reads and the initial snapshot are not point-in-time snapshots: documents modified during
-  the scan may be read before or after the change.
+- Batch reads, the initial snapshot and snapshot streams are not point-in-time snapshots: a
+  document modified during the scan may be read before or after the change, and one created during
+  the scan may be missing. Each `(pk, id)` is returned at most once per read, also when a partition
+  splits during the read; a document deleted and re-created during the read is returned in the
+  version the read reached first. A projecting `query` without `id` is not de-duplicated.
 - `query` runs per partition; global `ORDER BY`, `GROUP BY`, `DISTINCT`, `TOP`/`OFFSET` and
   aggregates belong in Spark. Spark filters are not pushed down: filter pushdown for Python
   sources (PySpark 4.1+) needs a Spark conf that serverless compute does not expose, and planning

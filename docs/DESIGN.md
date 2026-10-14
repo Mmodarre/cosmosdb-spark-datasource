@@ -85,9 +85,71 @@ paths (`client.py`, `backend.py`).
    3. Call `read_feed_ranges(force_refresh=True)`.
    4. Sub-split every feed range into `partitions_per_feed_range` EPK sub-ranges. `auto` uses `documentsSize / feed_ranges / 1 GiB`, capped at 64.
    5. Return one `CosmosQueryPartition` per sub-range, carrying the token and partition key definition.
-2. `read()` (executor): `query_items(query, parameters, feed_range=<sub-range>, max_item_count=page_size)`, iterated **page by page**; rows are yielded as documents arrive, so a partition is never materialized. After the SDK's own retries are exhausted, transient errors resume from the last fully consumed page's continuation.
+2. `read()` (executor): `batch.query_documents` runs `query_items(query, parameters, feed_range=<scope>, max_item_count=page_size)` page by page, with every scope inside one physical partition; rows are yielded as documents arrive, so a partition is never materialized. After the SDK's own retries are exhausted, transient errors resume from the last fully consumed page's continuation. Splits and duplicates: next section.
 3. Queries run independently per sub-range. `ORDER BY`, `GROUP BY`, `DISTINCT`, `TOP` and aggregates are therefore per partition (a warning is logged).
 4. Batch reads are **not snapshot-isolated**: documents changed during the scan may be read before or after the change. Use the change feed for consistent incremental ingestion.
+
+### Splits and duplicates during a query
+
+Requirement: at most one row per `(pk, id)` per read (snapshot CDC downstream needs unique keys),
+with memory that does not grow with the partition, which can hold tens of GB.
+
+What the service and the SDK do (verified against the service unless noted):
+- A `SELECT *` scoped to one physical partition returns documents in `_rid` order, and the backend
+  continuation is `-RID:~<last _rid>#...`: the next page resumes after the last `_rid` returned. A
+  replace keeps a document's `_rid` (and place); a delete followed by a re-create of the same key
+  makes a new document with a new, higher `_rid`, which the scan reaches again at its end. Every
+  "modified document returned twice" in the live runs of 0.2.0 was such a re-creation.
+- After a split, the children hold the parent's documents with their `_rid`s, so a parent's
+  continuation resumes correctly on a child: sub-ranges that fell inside one child after a split
+  were read without loss or duplicates.
+- azure-cosmos 4.17.1, scope inside one partition, split mid-read: the SDK retries the 410/1002
+  itself, and if the scope now spans several children it cannot carry the single-partition
+  (legacy) continuation over, logs "restarting this feed_range query from the beginning" and reads
+  the range again (`__QueryFeed`, `_should_bridge_legacy_continuation`). One read returned 17,998
+  duplicates this way. If the scope falls inside one child, the SDK continues correctly.
+- azure-cosmos 4.14.0 raises the 410/1002 (`PartitionKeyRangeGoneRetryPolicy` refreshes the routing
+  map and gives up), and for a scope spanning several partitions sends the same continuation to each
+  of them in one call and keeps only the last one's (`__QueryFeed`, read from the source).
+
+Options considered:
+1. *Resume children from the parent's continuation.* Needs the split to be detected before a
+   restarted page is passed on, and every SDK query to stay within one partition (also because of
+   4.14.0). Zero memory, no extra RU. Does not address re-created documents.
+2. *A deterministic ordering plus a resume key*, e.g. `ORDER BY c.id` with `c.id > @last` after a
+   split. The SDK runs `ORDER BY` through its query-plan pipeline, whose targets come from the
+   plan's ranges rather than from `feed_range`; ordering by `_rid` is rejected by the service
+   ("Primary key order-by is not supported"); an ordered index scan per EPK sub-range costs more RU;
+   and a user `query` cannot be rewritten safely. Rejected.
+3. *Per-task de-duplication.* Exact de-duplication needs a record of every emitted key, because a
+   document deleted and re-created during the scan can have any key. A set in memory grows with the
+   partition.
+
+Choice: 1 for splits, and 3 restricted to the documents that can be duplicates.
+- Each task keeps a queue of scopes, each inside one physical partition, with the continuation of
+  its last consumed page. After every page it checks the partition key range id(s) that served it
+  (`x-ms-documentdb-partitionkeyrangeid`, via the response hook) and the cached routing map. If the
+  page came from more than one range, from a different range than the scope's earlier pages, or the
+  scope no longer lies in one partition, the page is dropped (the SDK may have restarted), the map is
+  refreshed, and the scope is replaced by its children, each resumed from the scope's last
+  continuation. A 410 that reaches the package (4.14.0, or exhausted SDK retries) also refreshes the
+  map. Ten re-plans without a consumed page fail the task with a clear error.
+- Re-created documents: a document whose `_ts` is at or after the server time of the task's first
+  response (the `Date` header) minus 120 s may have been written during the read, and is dropped if
+  its key was emitted already. Documents written before the read can only be returned once.
+  `dedup.SeenKeys` holds 64-bit fingerprints of the emitted keys (`blake2b` of the partition key,
+  with a missing value distinct from null, and the id) in sorted runs, merged like a binary counter;
+  runs of 512 Ki entries move to an anonymous temporary file. Memory stays below about 32 MiB; the
+  file grows by 8 bytes per emitted document; a membership test (only for documents written during
+  the read) is a binary search per run. A fingerprint collision can only drop a document written
+  during the read, with probability about n / 2^64 for n emitted documents.
+
+Tested (`tests/test_query_splits.py`): the fake serves queries in `_rid` order and reproduces both
+SDK behaviours (a test checks that it returns rows twice across a split without the package's
+handling). Splits before the first page and mid-read, with 1, 3 and 4 sub-ranges per partition, two
+splits in one read, the initial snapshot and snapshot streams, deletes and re-creates of documents
+already read and not yet read, replaces, and a randomized mix of splits and writes; with the
+previous query loop 23 of these tests fail.
 
 ### EPK sub-splitting correctness
 
@@ -211,8 +273,8 @@ snapshot; the engine-protocol simulation.
 **Planning and reading.** `partitions(P0, E0)` plans one or more `CosmosSnapshotPartition`s per
 *current* feed range with the batch reader's helper (`batch.split_feed_ranges`, `auto` included), so a
 split between P0 and planning only adds ranges. `read()` runs `SELECT * FROM c` with the batch reader's
-resumable query loop (`batch.query_documents`); splits during the query are handled by the SDK, as for
-batch reads. Rows: `operation='snapshot'`, `lsn=0`, `crts=NULL`, `ttl_expired=false`, `feed_range` =
+resumable query loop (`batch.query_documents`), which handles splits during the query as for batch
+reads (§4). Rows: `operation='snapshot'`, `lsn=0`, `crts=NULL`, `ttl_expired=false`, `feed_range` =
 the planned feed range.
 
 **Ordering guarantees.** P0 is resolved in `initialOffset()` (all probes complete) before
@@ -228,8 +290,8 @@ and S the snapshot rows. For a key k:
 2. k not changed after P0: no row of F. If k existed at P0 its current version is its P0 version. S
    contains it, provided (a) every snapshot query is served by a replica that has applied all writes up
    to P0 (next paragraph) and (b) a query run to completion returns every document not modified during
-   the query. (b) is the service's resume-key continuation: a document that is not modified keeps its
-   position. If k did not exist at P0 and was not created later, it is in neither source.
+   the query. (b) is the service's `_rid` continuation: a document that is not deleted keeps its
+   position, also across a split (§4). If k did not exist at P0 and was not created later, it is in neither source.
 So the merged result equals the container state as of the last change read. Rows of S for documents
 modified during the snapshot may hold either version; case 1 covers them. With LatestVersion, case 1
 lacks deletes, so documents deleted after P0 may remain. Tested: a property test with random inserts,
@@ -383,6 +445,7 @@ converted safely. See README for the conversion table.
 - Databricks engine compatibility (`tests/test_databricks_engine_compat.py`): a foreign copy of `pyspark.sql.types` reproduces the engine `StructType`. A subprocess loads a fake `_engine_pyspark`, strips client PySpark to the 4.0 API, and replays the engine runner's admission-control protocol (signature check, `asdict` limit wire format, `reportLatestOffset`, AvailableNow mixin). Without `_compat.py`, 7 of its 10 tests fail.
 - Local Spark (`tests/test_spark_local.py`): batch and AvailableNow stream through a real local SparkSession against the fake; runs where Java 17+ is available, and CI fails if it is skipped.
 - Initial snapshot (`tests/test_initial_snapshot.py`): batch-0-only snapshot rows, call order (start probes before any snapshot page; offsets logged first), replay before and after the batch-0 commit, both PySpark call orders, admission control with and without a cap, AvailableNow (also through the engine-protocol simulation) including the target move after batch 0, offsets without the snapshot field, a split between P0 and planning and one during the query, an empty batch 0, row schema and values, session-token enforcement against a lagging replica, the delay, the property-style convergence test and its sabotage check. Planning the snapshot from the start offset's field instead of the end offset fails 18 tests; dropping the session token in `read()` fails 4.
+- Query splits and duplicates (`tests/test_query_splits.py`): see §4, "Splits and duplicates during a query".
 - Snapshot streams (`tests/test_snapshot_stream.py`): offset shape and validation, mode mix-ups, one complete snapshot per batch with one `snapshot_ts`, one snapshot per AvailableNow run, interval gating on both PySpark paths, replays keep `seq` and `snapshot_ts`, a clock going back, container re-creation, session tokens against a lagging replica, splits between and during snapshots, user schemas, and the Databricks engine protocol in a subprocess. Stamping rows at read time, dropping the AvailableNow budget, the `_rid` check, the monotonic stamp or the per-start cache each fail at least one test.
 - Integration (`tests/test_integration.py`, `-m integration`): configured by environment variables, against an Azure Cosmos DB account or an emulator. Every test creates and deletes its own containers and seeds its own data: batch reads with key auth, a user schema, a parameterized query, `auto` planning, a V1 sub-split, multi-partition batch reads and streams, offset stability, LatestVersion incremental reads and restarts, transactional-batch LSN grouping, caps and stream sub-splits, AVAD create/replace/delete and replay determinism, LatestVersion `initial_snapshot` under concurrent writes, and a local SparkSession batch and stream against the endpoint. The AVAD initial-snapshot test seeds 2,000 documents in a one-partition container, reads the snapshot over four EPK sub-ranges while a thread inserts, updates, deletes and re-creates documents, and requires the merged result to equal the container after the first AvailableNow run; it also checks that every snapshot query carries the recorded session token and that a token ahead of the service is refused. The snapshot-stream test takes one snapshot per AvailableNow run on both PySpark protocol paths, replays a logged batch with its `snapshot_ts`, and re-creates the container.
 - Capability markers (`requires_avad`, `requires_epk_ranges`, `requires_multi_partition`, `requires_session_tokens`, `requires_aad`) skip what an endpoint cannot do. CI runs the suite against the Linux vNext emulator (no AVAD, no EPK sub-range filtering, one physical partition per container, no session-token enforcement) and the legacy Linux emulator (no AVAD), and against an account when its secrets are configured.
@@ -397,6 +460,6 @@ converted safely. See README for the conversion table.
 6. **AVAD retention**: a stream stopped for longer than the continuous-backup retention (7 or 30 days) cannot resume deterministically. Restart with a new checkpoint (with `initial_snapshot=true` it reads a new snapshot).
 7. **TTL deletes in AVAD** (`timeToLiveExpired`): mapped per documentation, not observed against the service.
 8. **`spark.sql.streaming.triggerAvailableNowWrapper.enabled=true` on PySpark 4.0/4.1** (internal, off by default): the wrapper calls `latestOffset()` before `setLatestSeenOffset` on a restart. With `max_items_per_trigger` set, the target can then be computed from a fresh start rather than the checkpoint, and the run fails. This combination is not supported. The default single-batch fallback and PySpark 4.2's native AvailableNow are fine.
-9. **Initial snapshot under weak consistency**: with ConsistentPrefix or Eventual consistency only the delay protects the snapshot from lagging replicas (best effort). The snapshot also assumes that a query run to completion returns every document not modified during it (the service's resume-key continuation); this is consistent with the integration tests but not documented by the service.
+9. **Initial snapshot under weak consistency**: with ConsistentPrefix or Eventual consistency only the delay protects the snapshot from lagging replicas (best effort). The snapshot also assumes that a query run to completion returns every document not deleted during it (the service's `_rid` continuation, §4); this was observed against the service, including a parent's continuation resumed on a child after a split, but it is not documented by the service.
 10. **Snapshot streams**: not point-in-time, like batch reads; a snapshot of an empty container has no rows and is invisible downstream; `snapshot_ts` uses the driver's wall clock, strictly increasing within a checkpoint but not across a checkpoint reset; with `snapshot_interval_seconds=0` a continuous stream reads the whole container in every micro-batch.
 11. **Regression-tested failure modes** (each has a test): batch-0 replay after a restart; SDK split widening of sub-range change-feed tokens; DECIMAL(38,s) with Python's 28-digit default context; access-token clients shared across principals; timestamp offsets >= 24h or out-of-range years under PERMISSIVE; a thread-unsafe split check in parallel start probes; mode validation on replay; the AvailableNow wrapper conf on PySpark 4.0/4.1 (documented above); PySpark 4.0/4.1 calling `latestOffset()` before `initialOffset()` on a new query.

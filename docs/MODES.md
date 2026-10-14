@@ -85,8 +85,11 @@ partition, so `ORDER BY`, `GROUP BY`, `DISTINCT`, `TOP` and aggregates apply per
   `auto` targets about 1 GiB per task). Rows are streamed page by page; transient errors resume
   from the last page.
 - Not a point-in-time snapshot: a document changed during the scan may be read before or after the
-  change. A document that is not modified during the scan is read exactly once; this is how the
-  service's query continuation behaves in tests, not a documented service guarantee.
+  change, and a document created during the scan may be missing. A document that is not modified
+  during the scan is read exactly once.
+- Each key `(pk, id)` appears at most once per read, as `create_auto_cdc_from_snapshot_flow`
+  requires, also when a partition splits during the read. A document deleted and re-created during
+  the scan is returned in the version the read reached first.
 - Deletes show up only as a key missing from the next read.
 
 **Use it for** small and medium containers read on a schedule, deletes without AVAD, and

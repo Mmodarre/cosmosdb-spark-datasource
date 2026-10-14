@@ -485,6 +485,7 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
             stats=stats,
             describe=f"the initial snapshot of {describe}",
             session_token=partition.session_token,
+            pk=partition.pk,
         )
         rows = 0
         for doc in docs:
@@ -499,6 +500,8 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
             pages=stats.pages,
             request_charge=stats.request_charge,
             retries=stats.retries,
+            replans=stats.replans,
+            duplicates=stats.duplicates,
             session_token=partition.session_token is not None,
         )
 
