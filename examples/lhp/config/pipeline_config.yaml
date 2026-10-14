@@ -29,3 +29,17 @@ pipeline: lhp_customers_scd2
 schema: "${silver_schema}"
 tags:
   pattern: batch_snapshot_scd2
+
+---
+pipeline: lhp_customers_snapshots_bronze
+tags:
+  pattern: snapshot_stream_bronze
+
+---
+# Reads only the bronze table of lhp_customers_snapshots_bronze, so it needs no data source.
+pipeline: lhp_customers_scd2_history
+schema: "${silver_schema}"
+environment:
+  dependencies: []
+tags:
+  pattern: snapshot_history_scd2

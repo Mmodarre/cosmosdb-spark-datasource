@@ -1,0 +1,44 @@
+# Snapshot stream into a bronze history (MODES.md, mode 6).
+#
+#   cosmosdb readStream (snapshot_stream=true) -> bronze customers_snapshots (append-only)
+#
+# Every micro-batch is one complete snapshot of the container, stamped with snapshot_ts (the same
+# value on every row, taken from the batch's logged end offset, so a replay keeps it). Each
+# micro-batch is one Delta commit, so a reader never sees half a snapshot, and a triggered update
+# (AvailableNow) plans exactly one new snapshot.
+#
+# The history exists nowhere else, so resets of this table are disabled. SCD2 history is built by
+# the separate pipeline lhp_customers_scd2_history, run after this one.
+pipeline: lhp_customers_snapshots_bronze
+flowgroup: customers_snapshots_bronze
+presets:
+  - cosmos_connection
+
+actions:
+  - name: load_customers_snapshot_stream
+    type: load
+    readMode: stream
+    source:
+      type: custom_datasource
+      options:
+        container: "${customers_container}"
+        snapshot_stream: "true"
+        # 0: one snapshot per trigger (one per triggered update). Set it, e.g. to 3600, if the
+        # pipeline ever runs continuously; otherwise every micro-batch is a full read.
+        snapshot_interval_seconds: "0"
+        partitions_per_feed_range: "${partitions_per_feed_range}"
+    target: v_customers_snapshot_stream
+    description: "One complete snapshot of the customers container per micro-batch"
+
+  - name: write_customers_snapshots
+    type: write
+    source: v_customers_snapshot_stream
+    write_target:
+      type: streaming_table
+      catalog: "${catalog}"
+      schema: "${bronze_schema}"
+      table: customers_snapshots
+      comment: "Append-only history of complete customers snapshots; snapshot_ts identifies each snapshot"
+      cluster_columns: ["snapshot_ts"]
+      table_properties:
+        pipelines.reset.allowed: "false"

@@ -76,13 +76,14 @@ class CosmosReaderBase:
     def _backend(self, token: SecretToken | None) -> Any:
         return client.get_backend(self._opts, token)
 
-    def _row_builder(self) -> RowBuilder:
+    def _row_builder(self, *, snapshot: bool = False) -> RowBuilder:
         return RowBuilder(
             self._schema,
             stream=self._stream,
             raw_column=self._opts.raw_json_column,
             corrupt_column=self._opts.corrupt_record_column,
             parse_mode=self._opts.parse_mode,
+            snapshot=snapshot,
         )
 
     def _retry_policy(self) -> RetryPolicy:

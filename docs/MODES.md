@@ -1,6 +1,6 @@
 # Read modes
 
-The `cosmosdb` data source reads a container in five ways. This page describes what each mode
+The `cosmosdb` data source reads a container in six ways. This page describes what each mode
 emits, what it guarantees, when to use it and which target-table pattern goes with it, followed by
 a decision guide, the ordering rule, the full-refresh rules and costs. Option details are in the
 [README](../README.md#options); the Lakehouse Plumber setup is in [LHP-GUIDE.md](LHP-GUIDE.md).
@@ -12,6 +12,7 @@ a decision guide, the ordering rule, the full-refresh rules and costs. Option de
 | 3 | AllVersionsAndDeletes (AVAD) | `change_feed_mode=AllVersionsAndDeletes` (`start_from=Now` only) | `create`, `replace`, `delete` | yes | continuous backup with the AVAD change feed; no partition merge | an append-only change log |
 | 4 | AVAD + initial snapshot | mode 3 plus `initial_snapshot=true` | `snapshot`, then `create`, `replace`, `delete` | yes | as mode 3 | `create_auto_cdc_flow`, `sequence_by struct(rank, _ts, lsn)`, `apply_as_deletes` |
 | 5 | LatestVersion + initial snapshot | mode 2 plus `initial_snapshot=true` | `snapshot`, then `upsert` | no | none | `create_auto_cdc_flow`, `sequence_by struct(rank, _ts, lsn)` |
+| 6 | Snapshot stream | `snapshot_stream=true` (`snapshot_interval_seconds`) | (no column); `snapshot_ts` per snapshot | by diffing consecutive snapshots | none | bronze history, then `create_auto_cdc_from_snapshot_flow` with a source function in a separate pipeline |
 
 What has run where:
 
@@ -22,6 +23,7 @@ What has run where:
 | 3 | yes | yes | no (no emulator supports AVAD) |
 | 4 | yes | yes | no |
 | 5 | no | no | both |
+| 6 | yes | yes | legacy only (needs EPK sub-range filtering) |
 
 All modes are also covered by unit tests against a service fake (`tests/fake_cosmos.py`).
 
@@ -259,9 +261,11 @@ One stream yields the full current state plus every later change, deletes includ
 - `max_items_per_trigger` does not limit the snapshot.
 - Account requirements as mode 3.
 
-With `Trigger.AvailableNow` (and triggered SDP updates), the target position is captured before P0
-is resolved, so the first run usually contains only the snapshot, and changes made during it
-arrive in the next run.
+With `Trigger.AvailableNow` (and triggered SDP updates) Spark captures the run's end position before
+P0 is resolved. The reader moves it once, right after the snapshot, to the current position, so the
+first run also reads the changes made while the snapshot was read and leaves the target complete
+(observed on Databricks with writes during the snapshot). On PySpark 4.0 and 4.1 a run is a single
+micro-batch, so there the changes follow in the next run.
 
 **Use it for** a current-state replica with hard deletes, on an account with continuous backup.
 
@@ -352,13 +356,114 @@ changes = (
 
 **Cost.** One query read, then O(changes).
 
+## 6. Snapshot stream
+
+**Emits** one complete snapshot of the container per micro-batch: the rows of a batch read
+(`id, pk, _ts, _etag, body`) plus `snapshot_ts`, the same value on every row of one snapshot.
+
+**Why.** An SDP append flow keeps a history of container states this way. Nothing else in SDP
+does: a flow that writes a streaming table needs a streaming source, `once=True` runs only on the
+first update and on a full refresh, and a materialized view replaces its contents.
+
+**Guarantees and limitations.**
+- With `Trigger.AvailableNow` (every triggered SDP update), a run plans exactly one new snapshot.
+  A run that first replays an uncommitted batch of a failed run commits that one as well.
+- `snapshot_ts` is decided when the batch is planned (`max(now, previous + 1 ms)`, UTC, whole
+  milliseconds) and stored in the batch's end offset, so it strictly increases within a checkpoint
+  and a replay keeps it. A replay re-reads the rows, so they reflect the container at replay time.
+- One micro-batch is one Delta commit: a reader sees all rows of a snapshot or none.
+- Under other triggers a new snapshot is planned once `snapshot_interval_seconds` has passed since
+  the previous one; with `0` a continuously running stream reads the whole container in every
+  micro-batch.
+- Not a point-in-time read, like mode 1. A snapshot of an empty container has no rows, so it is
+  invisible downstream.
+- A re-created container fails with an explanatory error; reset only this flow's checkpoint (the
+  bronze history is kept, and the new checkpoint starts again at `seq 0` with a later
+  `snapshot_ts`).
+
+**Use it for** SCD2 history "as of each run" when the raw snapshots should be kept in bronze, for
+example to rebuild the history later.
+
+```python
+snapshots = (
+    spark.readStream.format("cosmosdb")
+    .options(**conn, container="customers", snapshot_stream="true", partitions_per_feed_range="auto")
+    .load()
+)
+(
+    snapshots.writeStream.option("checkpointLocation", "/Volumes/<catalog>/<schema>/<volume>/customers_snapshots")
+    .trigger(availableNow=True)  # one new snapshot per run
+    .toTable("<catalog>.<schema>.customers_snapshots")
+)
+```
+
+SDP, two pipelines run in this order ([LHP example](../examples/lhp/pipelines/lhp_customers_snapshots_bronze/)):
+
+```python
+# pipeline 1: bronze history
+@dp.table(
+    name="customers_snapshots",
+    cluster_by=["snapshot_ts"],
+    table_properties={"pipelines.reset.allowed": "false"},
+)
+def customers_snapshots():
+    return spark.readStream.format("cosmosdb").options(**COSMOS, container="customers", snapshot_stream="true").load()
+```
+
+```python
+# pipeline 2: SCD2 from the bronze history
+from datetime import datetime, timedelta, timezone
+
+BRONZE = "<catalog>.<bronze_schema>.customers_snapshots"
+EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def next_snapshot(latest):
+    bronze = spark.read.table(BRONZE)
+    candidates = bronze
+    if latest is not None:  # a naive UTC datetime, truncated to milliseconds by SDP
+        latest = latest.replace(tzinfo=timezone.utc) if latest.tzinfo is None else latest
+        previous_ms = spark.range(1).select(F.unix_millis(F.lit(latest).cast("timestamp"))).first()[0]
+        candidates = bronze.where(F.unix_millis("snapshot_ts") > previous_ms)
+    following = candidates.agg(F.min(F.unix_micros("snapshot_ts"))).first()[0]
+    if following is None:
+        return None
+    snapshot = bronze.where(F.unix_micros("snapshot_ts") == following).select("pk", "id", "_ts", "_etag", "body")
+    return snapshot, EPOCH + timedelta(microseconds=following)
+
+
+dp.create_streaming_table("customers_scd2_history", table_properties={"pipelines.reset.allowed": "false"})
+dp.create_auto_cdc_from_snapshot_flow(
+    target="customers_scd2_history",
+    source=next_snapshot,
+    keys=["pk", "id"],
+    stored_as_scd_type=2,
+)
+```
+
+**Target pattern.**
+- Bronze: a streaming table clustered by `snapshot_ts`, with `pipelines.reset.allowed=false`: the
+  history exists nowhere else.
+- Silver is a separate pipeline, run after bronze (for example by a job): SDP calls the source
+  function at run time, so it cannot see that the function reads bronze, and nothing would order
+  the two flows in one pipeline.
+- The first call of the source function must return a snapshot (SDP fails the update otherwise),
+  so bronze must hold one first.
+- SDP passes the last processed version back as a naive UTC datetime truncated to milliseconds;
+  compare at millisecond precision. Never select `snapshot_ts` into the snapshot: it changes on
+  every run, so every row would get a new SCD2 version every time.
+
+**Cost.** Each snapshot is a full read, as in mode 1, plus about 1 RU per feed range for the
+session-token probes. Bronze stores a full copy of the container per snapshot, so plan a
+retention (for example a periodic `DELETE ... WHERE snapshot_ts < ...`).
+
 ## Decision guide: snapshot or change feed
 
 The LatestVersion feed is always on but has no deletes. AVAD has deletes but requires continuous
 backup with the feature enabled, no partition merge, and a stream that never falls behind its
 retention.
 
-Prefer a **batch snapshot** (mode 1) when:
+Prefer a **snapshot** (mode 1, or mode 6 to keep the snapshots in bronze) when:
 - deletes are needed, but the account has no continuous backup or has used partition merge;
 - outages may exceed the AVAD retention;
 - the container is small and runs are infrequent;
@@ -372,7 +477,7 @@ Prefer the **change feed** (mode 2, mode 4 with deletes, mode 5 for a cheaper st
 - the order of changes per document matters.
 
 Rebuilding the target is not a reason to choose a snapshot: with append-only bronze, the target of
-modes 2, 4 and 5 can be rebuilt from bronze.
+modes 2, 4, 5 and 6 can be rebuilt from bronze. Only mode 1 has no bronze.
 
 | Requirement | Mode |
 |---|---|
@@ -380,6 +485,7 @@ modes 2, 4 and 5 can be rebuilt from bronze.
 | Current state, no hard deletes (or soft deletes) | 2, or 5 for a cheaper initial load |
 | Current state with deletes, no continuous backup, small or medium container | 1 |
 | SCD2 history as of each run | 1 with `stored_as_scd_type=2` |
+| SCD2 history as of each run, with the raw snapshots kept in bronze | 6, then a separate snapshot-SCD2 pipeline |
 | Every version and delete (audit log) | 4 (bronze holds every change), or 3 for changes after "now" only |
 
 ### Why not a separate one-time snapshot flow with AVAD
@@ -435,6 +541,8 @@ stream.
 | Reset only the stream checkpoint (modes 4, 5) | Never. Bronze would mix two stream incarnations: the new snapshot (rank 0) loses against older change rows (rank 1), and the changes in the gap never arrive. Refresh the whole pipeline: a new P0 and a new snapshot, with bronze and the target rebuilt together. |
 | AVAD stream stopped longer than the retention | Full refresh of the whole pipeline, then reconcile. |
 | Mode 1 (snapshot to SCD2, no bronze) | A refresh restarts the SCD2 history from the current state; older versions are lost. |
+| Mode 6 bronze history | Disable resets (`pipelines.reset.allowed=false`): the history exists nowhere else. Resetting only the flow checkpoint is safe: a new `seq 0`, and a new snapshot is appended. |
+| Mode 6 SCD2 from the history | Disable resets. A deliberate rebuild replays every snapshot still in bronze, in order. |
 
 ## Costs
 
@@ -442,7 +550,7 @@ Measured on 400 RU/s containers; RU scales roughly with document size.
 
 | Read | RU per 1,000 documents of 0.55 KB | Notes |
 |---|---|---|
-| Batch `SELECT *` (mode 1; the snapshot of modes 4 and 5) | about 23 | about 39 for documents of 1.4 KB |
+| Batch `SELECT *` (modes 1 and 6; the snapshot of modes 4 and 5) | about 23 | about 39 for documents of 1.4 KB |
 | LatestVersion initial load from `Beginning` (mode 2) | about 58 | |
 | AVAD, per change (modes 3 and 4) | not measured | |
 | Position probes of a stream | about 1 RU per feed range and micro-batch | |

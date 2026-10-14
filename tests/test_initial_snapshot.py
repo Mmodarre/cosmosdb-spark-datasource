@@ -367,23 +367,108 @@ def test_available_now_target_captured_before_the_start(make_store) -> None:
 
 
 @needs_42
-def test_available_now_reaches_the_target_after_the_snapshot_and_terminates(make_store) -> None:
+def test_available_now_moves_the_target_past_the_snapshot_once_and_terminates(make_store) -> None:
     store = make_store(partitions=2)
     load(store, 50)
     h = snap(store, ac=True, max_items_per_trigger=5)
     h.start()  # P0
-    load(store, 20, start=50)  # after P0, before the target
+    load(store, 20, start=50)  # after P0, before the target Spark captures
     h.planner.prepareForTriggerAvailableNow()
-    load(store, 10, start=70)  # after the target
-    rows = h.run_until_idle(ReadMaxRows(5))
-    snapshot, changes = h.batches[0], [r for b in h.batches[1:] for r in b]
-    assert ops(h, snapshot) == {"snapshot"} and ids(h, snapshot) == sorted(f"d{i}" for i in range(80))
-    assert ids(h, changes) == sorted(f"d{i}" for i in range(50, 70))  # up to the target, capped batches
-    assert len(h.batches) > 3 and "snapshot" not in ops(h, changes)
-    assert len(rows) == len(snapshot) + len(changes)
-    h.restart()  # next AvailableNow run
+    load(store, 10, start=70)  # after that target, before batch 0 ran
+    first = h.run_batch(ReadMaxRows(5))  # batch 0: the snapshot
+    assert ops(h, first) == {"snapshot"} and ids(h, first) == sorted(f"d{i}" for i in range(80))
+    load(store, 5, start=80)  # after batch 0, before the target is moved
+    rows = h.run_until_idle(ReadMaxRows(5))  # terminates
+    # The target moved once, to the position after batch 0: every change up to then is in this run.
+    assert ids(h, rows) == sorted(f"d{i}" for i in range(50, 85)) and "snapshot" not in ops(h, rows)
+    assert len(h.batches) > 3 and all(len(b) <= 5 + 2 for b in h.batches[1:])
+    h.restart()  # next AvailableNow run: nothing new
     h.planner.prepareForTriggerAvailableNow()
-    assert ids(h, h.run_until_idle(ReadMaxRows(5))) == sorted(f"d{i}" for i in range(70, 80))
+    assert h.run_until_idle(ReadMaxRows(5)) == []
+
+
+@needs_42
+def test_available_now_moves_the_target_only_once(make_store) -> None:
+    store = make_store(partitions=1)
+    load(store, 10)
+    h = snap(store, ac=True, max_items_per_trigger=3)
+    h.planner.prepareForTriggerAvailableNow()
+    h.start()
+    h.run_batch(ReadMaxRows(3))  # snapshot
+    load(store, 4, start=10)
+    planned = h.latest(ReadAllAvailable())  # moves the target to "now" (d10..d13)
+    load(store, 1, start=30)
+    assert h.latest(ReadAllAvailable()) == planned  # asked again from batch 0's end: the target stays
+    store.delete("p30", "d30")
+    first_changes = h.run_batch(ReadMaxRows(3))
+    load(store, 4, start=20)  # after the moved target: not part of this run
+    rest = h.run_until_idle(ReadMaxRows(3))
+    assert ids(h, first_changes + rest) == sorted(f"d{i}" for i in range(10, 14))
+    h.restart()
+    h.planner.prepareForTriggerAvailableNow()
+    later = h.run_until_idle(ReadMaxRows(3))
+    assert sorted(set(ids(h, later))) == sorted(["d30", *(f"d{i}" for i in range(20, 24))])
+
+
+@needs_42
+def test_first_available_now_run_is_complete_with_writes_during_the_snapshot(make_store) -> None:
+    """The scenario of a first (or full-refresh) triggered update: writes while batch 0 reads the container.
+
+    One AvailableNow run must leave the merged result equal to the container.
+    """
+    store = make_store(partitions=2)
+    load(store, 120)
+    rng = random.Random(7)
+    pages = [0]
+
+    def during_snapshot() -> None:  # inserts, updates, deletes and re-creates between snapshot pages
+        pages[0] += 1
+        live = [d for d in store.live_documents()]
+        for _ in range(3):
+            doc = rng.choice(live)
+            store.upsert({**doc, "v": rng.randint(1000, 9999)})
+        victim = rng.choice(live)
+        store.delete(victim["pk"], victim["id"])
+        store.upsert({"id": f"n{pages[0]}", "pk": f"p{pages[0] % 41}", "v": -pages[0]})
+
+    h = snap(store, ac=True, page_size=10)
+    h.planner.prepareForTriggerAvailableNow()  # captured before P0, as Spark does
+    h.start()
+    store._before_query_page = during_snapshot
+    first = h.run_batch(ReadAllAvailable())
+    store._before_query_page = None
+    assert ops(h, first) == {"snapshot"} and pages[0] > 3
+    rows = first + h.run_until_idle(ReadAllAvailable())
+    assert len(h.batches) >= 2
+    assert merge(dicts(h, rows)) == truth(store)
+    assert merge(dicts(h, first)) != truth(store)  # the snapshot alone is not the container state
+
+
+@needs_42
+def test_available_now_target_is_not_moved_without_a_snapshot(make_store) -> None:
+    store = make_store(partitions=1)
+    load(store, 10)
+    h = StreamHarness(fake_options(store, change_feed_mode=AVAD), admission_control=True)
+    h.planner.prepareForTriggerAvailableNow()
+    h.start()
+    load(store, 5, start=10)  # after the target: next run
+    assert h.run_until_idle(ReadAllAvailable()) == []
+    h.restart()
+    h.planner.prepareForTriggerAvailableNow()
+    assert ids(h, h.run_until_idle(ReadAllAvailable())) == sorted(f"d{i}" for i in range(10, 15))
+
+
+def test_without_admission_control_the_first_available_now_run_ends_after_the_snapshot(make_store) -> None:
+    """PySpark 4.0/4.1: Spark runs one batch per AvailableNow run, so changes follow in the next run."""
+    store = make_store(partitions=1)
+    load(store, 10)
+    h = snap(store)
+    h.start()
+    load(store, 3, start=10)
+    first = h.run_batch()  # the single batch of this run
+    assert ops(h, first) == {"snapshot"}
+    h.restart()
+    assert ids(h, h.run_batch()) == sorted(f"d{i}" for i in range(10, 13))
 
 
 def test_snapshot_partitions_follow_partitions_per_feed_range(make_store, monkeypatch) -> None:

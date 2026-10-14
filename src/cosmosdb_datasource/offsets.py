@@ -29,18 +29,30 @@ is an initial offset and whose end carries ``"snapshot"``, i.e. only for batch 0
 was *planned* with a snapshot. That decision and the session tokens therefore come from the logged end
 offset, so a replay of batch 0 after a restart reads the snapshot again with the original tokens, even
 if the option was changed in between. Offsets without the field mean "no snapshot".
+
+Snapshot streams (``snapshot_stream=true``, :class:`SnapshotStreamOffset`) use their own offset::
+
+    {"v": 1, "kind": "snapshot", "seq": 0}                                                   (initial)
+    {"v": 1, "kind": "snapshot", "seq": 7, "snapshot_ts": "2026-10-15T01:00:03.123000Z", "rid": "..."}
+
+``seq`` counts the snapshots planned by the checkpoint; the batch ``(seq n-1, seq n]`` holds snapshot n,
+stamped with the end offset's ``snapshot_ts`` (whole milliseconds, written with six fraction digits).
+``kind`` keeps a checkpoint from being read in the other mode: each parser rejects the other kind.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from cosmosdb_datasource import epk
 from cosmosdb_datasource.errors import CosmosOffsetError
 
 OFFSET_VERSION = 1
+SNAPSHOT_KIND = "snapshot"
+_SNAPSHOT_TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
 
 @dataclass(frozen=True)
@@ -155,6 +167,11 @@ class Offset:
         version = data.get("v")
         if version != OFFSET_VERSION:
             raise CosmosOffsetError(f"Unsupported cosmosdb offset version {version!r} (expected {OFFSET_VERSION}).")
+        if data.get("kind") == SNAPSHOT_KIND:
+            raise CosmosOffsetError(
+                "The checkpoint was written by a snapshot_stream read, but this stream reads the change feed. "
+                "Use a new checkpoint location to switch modes."
+            )
         ranges = _parse_ranges(data.get("ranges"), "ranges")
         init = _parse_ranges(data["init"], "init") if data.get("init") is not None else None
         snapshot = SnapshotState.from_dict(data["snapshot"]) if data.get("snapshot") is not None else None
@@ -203,3 +220,67 @@ def min_overlapping_lsn(target: Offset, lo: str, hi: str) -> int:
     if not values:
         raise CosmosOffsetError(f"No target range overlaps [{lo!r}, {hi!r}).")
     return min(values)
+
+
+def format_snapshot_ts(value: datetime) -> str:
+    """UTC ISO-8601 with exactly six fraction digits and ``Z`` (fixed width, so the JSON is stable)."""
+    return value.astimezone(timezone.utc).strftime(_SNAPSHOT_TS_FORMAT)
+
+
+def parse_snapshot_ts(text: str) -> datetime:
+    try:
+        return datetime.strptime(text, _SNAPSHOT_TS_FORMAT).replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        raise CosmosOffsetError(
+            f"Offset field 'snapshot_ts' must look like 2026-01-31T00:00:00.000000Z, got {text!r}."
+        ) from None
+
+
+@dataclass(frozen=True)
+class SnapshotStreamOffset:
+    """Position of a snapshot stream: ``seq`` snapshots planned; the last one stamped ``snapshot_ts``."""
+
+    seq: int
+    snapshot_ts: str | None = None  # format_snapshot_ts(); None only for seq 0
+    rid: str | None = None  # container _rid when the snapshot was planned; None only for seq 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.seq, bool) or not isinstance(self.seq, int) or self.seq < 0:
+            raise CosmosOffsetError(f"Offset field 'seq' must be an integer >= 0, got {self.seq!r}.")
+        if self.snapshot_ts is not None:
+            parse_snapshot_ts(self.snapshot_ts)
+        if self.seq > 0 and (self.snapshot_ts is None or not self.rid):
+            raise CosmosOffsetError("A snapshot offset with seq > 0 needs 'snapshot_ts' and 'rid'.")
+
+    @property
+    def snapshot_datetime(self) -> datetime | None:
+        return parse_snapshot_ts(self.snapshot_ts) if self.snapshot_ts is not None else None
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"v": OFFSET_VERSION, "kind": SNAPSHOT_KIND, "seq": self.seq}
+        if self.snapshot_ts is not None:
+            out["snapshot_ts"] = self.snapshot_ts
+        if self.rid is not None:
+            out["rid"] = self.rid
+        return out
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> SnapshotStreamOffset:
+        if not isinstance(data, Mapping):
+            raise CosmosOffsetError(f"Offset must be a JSON object, got {type(data).__name__}.")
+        version = data.get("v")
+        if version != OFFSET_VERSION:
+            raise CosmosOffsetError(f"Unsupported cosmosdb offset version {version!r} (expected {OFFSET_VERSION}).")
+        if data.get("kind") != SNAPSHOT_KIND:
+            if "ranges" in data:
+                raise CosmosOffsetError(
+                    "The checkpoint was written by a change-feed stream, but this stream uses snapshot_stream=true. "
+                    "Use a new checkpoint location to switch modes."
+                )
+            raise CosmosOffsetError(f"Offset kind must be {SNAPSHOT_KIND!r}, got {data.get('kind')!r}.")
+        rid, ts = data.get("rid"), data.get("snapshot_ts")
+        if rid is not None and not isinstance(rid, str):
+            raise CosmosOffsetError(f"Offset field 'rid' must be a string, got {rid!r}.")
+        if ts is not None and not isinstance(ts, str):
+            raise CosmosOffsetError(f"Offset field 'snapshot_ts' must be a string, got {ts!r}.")
+        return cls(seq=data.get("seq"), snapshot_ts=ts, rid=rid)  # type: ignore[arg-type]

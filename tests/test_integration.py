@@ -662,19 +662,20 @@ def test_initial_snapshot_all_versions_with_concurrent_writes_converges(make_con
     rows = [dict(zip(names, r, strict=True)) for r in snapshot_rows]
     assert {r["operation"] for r in rows} == {"snapshot"} and {r["lsn"] for r in rows} == {0}
     assert sent and all(token == tokens["-FF"] for _path, token in sent), "every snapshot query is pinned"
-    rows += [dict(zip(names, r, strict=True)) for r in h.run_until_idle(limit)]
-
-    # Later AvailableNow runs drain the feed (repeated only if a probe lagged behind the last write).
+    # Run 1 continues: its AvailableNow target, captured before P0, moves once after batch 0 to the
+    # current position, so the same run drains the changes made while the snapshot was read. The writer
+    # stopped before batch 0 ended; the pause lets the replicas apply its last writes.
     last_write = max(write_lsns)
-    for _ in range(5):
-        time.sleep(1)
-        h.restart()
-        h.planner.prepareForTriggerAvailableNow()
-        rows += [dict(zip(names, r, strict=True)) for r in h.run_until_idle(limit)]
-        if min(json.loads(h.committed)["ranges"].values()) >= last_write:
-            break
-    assert min(json.loads(h.committed)["ranges"].values()) >= last_write
-    assert _merge_latest(rows) == _container_state(container)
+    time.sleep(2)
+    rows += [dict(zip(names, r, strict=True)) for r in h.run_until_idle(limit)]
+    run1_batches = len(h.batches)
+    assert min(json.loads(h.committed)["ranges"].values()) >= last_write, "run 1 drained the writes"
+    assert _merge_latest(rows) == _container_state(container), "complete after the first AvailableNow run"
+    assert run1_batches > 2  # the snapshot plus capped change batches
+
+    h.restart()  # a later run finds nothing new
+    h.planner.prepareForTriggerAvailableNow()
+    assert h.run_until_idle(limit) == []
 
     # The race was exercised: changes overtook rows already read by the snapshot.
     snap = {(r["pk"], r["id"]): r["_ts"] for r in rows if r["operation"] == "snapshot"}
@@ -690,6 +691,108 @@ def test_initial_snapshot_all_versions_with_concurrent_writes_converges(make_con
     with pytest.raises(CosmosHttpResponseError) as info:
         list(container.query_items("SELECT * FROM c", feed_range=feed_range_dict("", "FF"), session_token=future))
     assert (info.value.status_code, info.value.sub_status) == (404, 1002)
+
+
+@requires("requires_epk_ranges")
+def test_snapshot_stream(make_container, sdk_db) -> None:
+    """snapshot_stream=true: one complete snapshot per AvailableNow run on both PySpark protocol paths,
+    snapshot_ts kept by a replay, and a re-created container rejected until the checkpoint is reset."""
+    from azure.cosmos import PartitionKey
+
+    from cosmosdb_datasource import client as client_module
+    from cosmosdb_datasource.errors import CosmosOffsetError
+    from cosmosdb_datasource.offsets import SnapshotStreamOffset
+
+    name, container = make_container()
+    for start in range(0, 600, 50):
+        pk = f"p{(start // 50) % 12}"
+        ops = [("upsert", ({"id": f"s{i}", "pk": pk, "v": 0},)) for i in range(start, start + 50)]
+        container.execute_item_batch(ops, partition_key=pk)
+
+    def actual() -> dict[tuple, tuple]:
+        docs = container.query_items("SELECT c.id, c.pk, c._ts, c._etag FROM c", enable_cross_partition_query=True)
+        return {(d["pk"], d["id"]): (d["_ts"], d["_etag"]) for d in docs}
+
+    opts = options(name, snapshot_stream="true", partitions_per_feed_range=3, page_size=100)
+    h = StreamHarness(opts, admission_control=True)
+    names = h.schema.fieldNames()
+    limit = h.planner.getDefaultReadLimit()
+
+    def state(rows: list[tuple]) -> tuple[dict[tuple, tuple], set[Any]]:
+        docs = [dict(zip(names, r, strict=True)) for r in rows]
+        assert len(docs) == len({(d["pk"], d["id"]) for d in docs}), "a key appears twice in one snapshot"
+        return {(d["pk"], d["id"]): (d["_ts"], d["_etag"]) for d in docs}, {d["snapshot_ts"] for d in docs}
+
+    stamps = []
+    for run in range(2):  # PySpark 4.2 / Databricks protocol: one snapshot per AvailableNow run
+        if run:
+            for i in range(60):
+                container.upsert_item({"id": f"s{i}", "pk": f"p{(i // 50) % 12}", "v": run})
+            for i in range(100, 120):
+                container.delete_item(f"s{i}", partition_key=f"p{(i // 50) % 12}")
+            for i in range(30):
+                container.upsert_item({"id": f"n{i}", "pk": f"p{i % 12}", "v": -1})
+            time.sleep(2)
+            h.restart()
+        h.planner.prepareForTriggerAvailableNow()
+        if not run:
+            h.start()
+        before = len(h.batches)
+        got, stamp = state(h.run_until_idle(limit))
+        assert len(h.batches) == before + 1
+        assert got == actual() and len(stamp) == 1
+        stamps.append(SnapshotStreamOffset.from_dict(json.loads(h.committed)))
+    assert stamps[1].seq == 2 and stamps[1].snapshot_datetime > stamps[0].snapshot_datetime
+
+    # A new run without AvailableNow plans a snapshot; every query carries a session token.
+    h.restart()
+    start = h.committed
+    end = h.latest(limit)
+    parts = h.planner.partitions(json.loads(start), json.loads(end))
+    assert len(parts) == 3 * feed_range_count(container)
+    if _skip_reason({"requires_session_tokens"}) is None:
+        assert all(p.session_token for p in parts)
+
+    # Replay: the batch was logged but not committed; after a restart it keeps snapshot_ts.
+    h.offset_log.append((start, end))
+    for i in range(5):
+        container.upsert_item({"id": f"r{i}", "pk": "p1", "v": 5})
+    time.sleep(2)
+    h.restart()
+    got, stamp = state(h.read_range(start, end))
+    assert stamp == {SnapshotStreamOffset.from_dict(json.loads(end)).snapshot_datetime}
+    assert got == actual()  # re-read: the container at replay time
+
+    # PySpark 4.0/4.1 protocol on a new checkpoint.
+    old = StreamHarness(opts, admission_control=False)
+    old.start()
+    got, stamp = state(old.run_batch() or [])
+    assert got == actual() and len(stamp) == 1
+
+    # A re-created container fails until the checkpoint is reset.
+    h.planner.commit(json.loads(end))
+    h.committed = end
+    sdk_db.delete_container(name)
+    recreated = None
+    for attempt in range(6):
+        try:
+            recreated = sdk_db.create_container_if_not_exists(name, partition_key=PartitionKey(path="/pk"))
+            break
+        except Exception:
+            if attempt == 5:
+                raise
+            time.sleep(5)
+    _RetryingContainer(recreated).upsert_item({"id": "x", "pk": "p0", "v": 1})
+    time.sleep(2)
+    client_module.close_all()  # the SDK caches container properties per client
+    h.restart()
+    h.planner.prepareForTriggerAvailableNow()
+    with pytest.raises(CosmosOffsetError, match="re-created"):
+        h.run_batch(limit)
+    fresh = StreamHarness(opts, admission_control=True)
+    fresh.planner.prepareForTriggerAvailableNow()
+    fresh.start()
+    assert [dict(zip(names, r, strict=True))["id"] for r in fresh.run_until_idle(limit)] == ["x"]
 
 
 @pytest.mark.spark

@@ -71,6 +71,17 @@ STREAM_ONLY_OPTIONS = (
 )
 DEFAULT_INITIAL_SNAPSHOT_DELAY_SECONDS = 5.0
 
+# Change-feed options that a snapshot stream (snapshot_stream=true) rejects: it reads the whole
+# container in every micro-batch.
+SNAPSHOT_STREAM_EXCLUSIVE_OPTIONS = (
+    "change_feed_mode",
+    "start_from",
+    "initial_snapshot",
+    "initial_snapshot_delay_seconds",
+    "max_items_per_trigger",
+    "change_feed_end_wait_seconds",
+)
+
 SECRET_OPTIONS = ("account_key", "client_secret", "access_token")
 
 # Internal, undocumented test hook: "<module>:<callable>" returning a backend. Only honoured when
@@ -114,6 +125,8 @@ KNOWN_OPTIONS = frozenset(
         "change_feed_end_wait_seconds",
         "initial_snapshot",
         "initial_snapshot_delay_seconds",
+        "snapshot_stream",
+        "snapshot_interval_seconds",
         TEST_BACKEND_OPTION,
         # Spark may add "path" when .load(path) is used; we ignore it.
         "path",
@@ -252,6 +265,8 @@ class CosmosOptions:
     change_feed_end_wait_seconds: float = 120.0
     initial_snapshot: bool = False
     initial_snapshot_delay_seconds: float = DEFAULT_INITIAL_SNAPSHOT_DELAY_SECONDS
+    snapshot_stream: bool = False
+    snapshot_interval_seconds: float = 0.0
     stream_options_present: tuple[str, ...] = ()
     query_explicit: bool = False
     test_backend: str | None = None
@@ -276,7 +291,7 @@ class CosmosOptions:
             f"container={self.container!r}, auth_type={self.auth.auth_type!r}, "
             f"partitions_per_feed_range={self.partitions_per_feed_range!r}, "
             f"page_size={self.page_size}, change_feed_mode={self.change_feed_mode!r}, "
-            f"initial_snapshot={self.initial_snapshot})"
+            f"initial_snapshot={self.initial_snapshot}, snapshot_stream={self.snapshot_stream})"
         )
 
 
@@ -445,6 +460,17 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
     else:
         start_from = _parse_start_from(start_from_raw)
 
+    snapshot_stream = _bool(opts, "snapshot_stream", False)
+    if snapshot_stream:
+        conflicting = [n for n in SNAPSHOT_STREAM_EXCLUSIVE_OPTIONS if _get(opts, n) is not None]
+        if conflicting:
+            raise CosmosConfigError(
+                f"Option(s) {', '.join(conflicting)} cannot be combined with snapshot_stream=true: a snapshot "
+                "stream reads the whole container in every micro-batch, not the change feed."
+            )
+    elif _get(opts, "snapshot_interval_seconds") is not None:
+        raise CosmosConfigError("Option 'snapshot_interval_seconds' only applies with snapshot_stream=true.")
+
     query = _get(opts, "query")
     raw_column = _get(opts, "raw_json_column", DEFAULT_RAW_COLUMN) or DEFAULT_RAW_COLUMN
     corrupt_column = _get(opts, "corrupt_record_column", DEFAULT_CORRUPT_COLUMN) or DEFAULT_CORRUPT_COLUMN
@@ -489,6 +515,8 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
         initial_snapshot_delay_seconds=_float(
             opts, "initial_snapshot_delay_seconds", DEFAULT_INITIAL_SNAPSHOT_DELAY_SECONDS, minimum=0.0
         ),
+        snapshot_stream=snapshot_stream,
+        snapshot_interval_seconds=_float(opts, "snapshot_interval_seconds", 0.0, minimum=0.0),
         stream_options_present=tuple(n for n in STREAM_ONLY_OPTIONS if _get(opts, n) is not None),
         query_explicit=query is not None,
         test_backend=test_backend,

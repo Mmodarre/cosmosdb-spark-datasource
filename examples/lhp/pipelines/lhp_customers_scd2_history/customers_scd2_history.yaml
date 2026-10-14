@@ -1,0 +1,43 @@
+# SCD2 history from the bronze snapshots of lhp_customers_snapshots_bronze (MODES.md, mode 6).
+#
+#   bronze customers_snapshots --(py_functions/next_snapshot.py)--> silver customers_scd2_history
+#
+# create_auto_cdc_from_snapshot_flow calls next_snapshot(latest_version) until it returns None: each
+# call returns the oldest bronze snapshot newer than the last processed one, with its snapshot_ts as
+# the version, so a rebuild replays every snapshot still in bronze, in order.
+#
+# A separate pipeline on purpose: SDP calls the function at run time, so it cannot see that this flow
+# reads the bronze table, and nothing would order it after the bronze flow in one pipeline. Run
+# lhp_customers_snapshots_bronze first; its first update must have written a snapshot, because SDP
+# fails the update if the first call returns None. depends_on only declares that edge for `lhp dag`.
+pipeline: lhp_customers_scd2_history
+flowgroup: customers_scd2_history
+
+actions:
+  - name: write_customers_scd2_history
+    type: write
+    depends_on:
+      - "${catalog}.${bronze_schema}.customers_snapshots"
+    write_target:
+      type: streaming_table
+      mode: snapshot_cdc
+      catalog: "${catalog}"
+      schema: "${silver_schema}"
+      table: customers_scd2_history
+      comment: "customers as SCD2, one version per bronze snapshot (__START_AT/__END_AT = snapshot_ts)"
+      table_properties:
+        pipelines.reset.allowed: "false"
+      snapshot_cdc_config:
+        source_function:
+          file: py_functions/next_snapshot.py
+          function: next_snapshot
+          parameters:
+            bronze_table: "${catalog}.${bronze_schema}.customers_snapshots"
+            version_column: snapshot_ts
+            keys: ["pk", "id"]
+            # The columns SCD2 tracks. Never snapshot_ts: it changes on every snapshot, so every row
+            # would get a new version every time.
+            columns: ["pk", "id", "_ts", "_etag", "body"]
+            min_snapshot_ratio: "${min_snapshot_ratio}"
+        keys: ["pk", "id"]
+        stored_as_scd_type: 2

@@ -1,6 +1,6 @@
 [project]
 name = "cosmosdb-spark-datasource"
-version = "0.2.0"
+version = "0.3.1"
 description = "PySpark Python data source for Azure Cosmos DB for NoSQL: parallel batch reads and change-feed streaming for Databricks serverless and Lakeflow Spark Declarative Pipelines."
 readme = "README.md"
 license = "Apache-2.0"

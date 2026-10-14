@@ -64,8 +64,9 @@ cosmosdb_datasource/
   batch.py        CosmosBatchReader / CosmosQueryPartition; feed-range planning and the resumable
                   query loop, shared with the initial snapshot
   stream.py       CosmosStreamReader / CosmosChangeFeedPartition / CosmosSnapshotPartition, budget allocation
+  snapshot_stream.py  CosmosSnapshotStreamReader / CosmosSnapshotStreamPartition (snapshot_stream=true)
   changefeed.py   continuation-token codec, LSN-bounded read loop
-  offsets.py      Offset model (incl. the initial-snapshot record), re-keying after splits
+  offsets.py      Offset model (incl. the initial-snapshot record), re-keying after splits; SnapshotStreamOffset
   documents.py    partition-key paths, change-feed item normalization
   schema.py       default schemas, safe conversion, PERMISSIVE/DROPMALFORMED/FAILFAST
   retry.py        transient classification, retry-after, backoff with jitter
@@ -195,8 +196,17 @@ their own invariants. Correctness does not depend on the choice: the change-feed
 before the snapshot is read, which is all the merge argument needs. Batch 0 always runs: Spark runs the
 first batch whenever no offset is committed, and E0's JSON differs from the initial offset anyway.
 With AvailableNow, the target captured by `prepareForTriggerAvailableNow()` only limits change-feed
-ends; if it is below P0 (it is captured before `initialOffset()`), batch 1 has nothing to read and the
-run stops after the snapshot.
+ends. Spark captures it before `initialOffset()` resolves P0, so it is below P0, and batch 1 would have
+nothing to read: the changes made while the snapshot was read would wait for the next run, and a first
+or full-refresh update would never leave the target exact. The first `latestOffset` whose start is
+batch 0's end offset therefore replaces the target once with the positions it has just probed
+(`_reported`, no extra request). The run then drains every change up to the moment after batch 0, in
+capped batches, and terminates at that fixed position. The merge argument does not change (the target
+only bounds a run), and termination holds because the target moves at most once per run
+(`_target_refreshed`, reset by `prepareForTriggerAvailableNow`). On PySpark 4.0/4.1 a run is a single
+batch, so the first run ends after the snapshot. Tested: changes before, during and after batch 0
+within one run; the move happens once even when Spark asks twice for batch 1; no move without a
+snapshot; the engine-protocol simulation.
 
 **Planning and reading.** `partitions(P0, E0)` plans one or more `CosmosSnapshotPartition`s per
 *current* feed range with the batch reader's helper (`batch.split_feed_ranges`, `auto` included), so a
@@ -250,6 +260,47 @@ applied there would be in neither source. Mitigations:
 - *Splits.* After a split between P0 and planning, the parent's token is sent for the child ranges;
   the SDK resolves parent tokens the same way client-side. Whether the gateway applies a parent's token
   to a child partition is **not verified** (no live split was triggered).
+
+### Snapshot streams
+
+Goal: one complete snapshot per micro-batch, so an append flow keeps a history of container states.
+SDP has no other way to append a full snapshot per update: an append flow needs a streaming source,
+`once` runs once, and a materialized view replaces its contents.
+
+**Offsets** (`SnapshotStreamOffset`): `{"v": 1, "kind": "snapshot", "seq": n, "snapshot_ts": "...Z",
+"rid": "..."}`; the initial offset is `{"v": 1, "kind": "snapshot", "seq": 0}` (no I/O, identical on
+every call). The batch `(seq n-1, seq n]` reads snapshot n. `snapshot_ts` has a fixed format (six
+fraction digits, `Z`), so unchanged offsets serialize byte-identically. `kind` makes each parser reject
+the other mode's checkpoints.
+
+**Planning (`latestOffset`)**, in order:
+1. Asked again for the same start: return the end planned for it (PySpark 4.0/4.1 may call
+   `latestOffset()` before `initialOffset()` on a new query).
+2. AvailableNow, and the run's one snapshot is planned: return the start, so the run ends.
+3. `snapshot_interval_seconds` not yet passed since `start.snapshot_ts`: return the start.
+4. Otherwise check the container's `_rid` against the start's, and plan `seq + 1` with
+   `snapshot_ts = max(now, previous + 1 ms)`, truncated to milliseconds.
+
+`snapshot_ts` has millisecond precision because SDP's `create_auto_cdc_from_snapshot_flow` stores a
+timestamp version with full precision in `__START_AT` but passes it back to the source function as a
+naive UTC `datetime` truncated to milliseconds (observed on DBR 18.3: stored `...50.316879`, passed back
+`...50.316000`). A consumer comparing microseconds would select the same snapshot forever. With whole
+milliseconds the round trip is exact, and the +1 ms step keeps two snapshots from sharing a millisecond
+after a clock regression.
+
+**Determinism.** `snapshot_ts` lives in the logged end offset and is copied into every partition, so
+retries and replays keep it. The rows are not a function of the offset (a replay re-reads the
+container): a replayed batch is still a complete snapshot taken at or after `snapshot_ts`, and the
+idempotent Delta sink commits it once.
+
+**Reading.** `partitions(start, end)` re-checks the `_rid`, reads the current feed ranges, splits them
+like a batch read, and probes a `Now` session token per feed range (LatestVersion, which every account
+has; sequential, about 1 RU each). Each partition runs `query` through `batch.query_documents` with that
+token, so with Session consistency the snapshot includes every write acknowledged before planning.
+Offsets keep no per-range state, so splits between snapshots need no handling.
+
+**Read limits** are ignored (`getDefaultReadLimit()` returns `ReadAllAvailable`): splitting a snapshot
+across batches would break its atomicity.
 
 ### Partition splits
 
@@ -311,7 +362,8 @@ Notes:
 ## 8. Schemas
 
 Spark gives `schema()` no batch/stream signal. Therefore:
-- If any change-feed option (`change_feed_mode`, `start_from`, `max_items_per_trigger`) is present, the default schema is the change-feed schema; otherwise it is the batch schema.
+- `snapshot_stream=true` selects the snapshot-stream schema (the batch schema plus `snapshot_ts`).
+- Otherwise, if any change-feed option (`change_feed_mode`, `start_from`, `max_items_per_trigger`, `initial_snapshot`, `initial_snapshot_delay_seconds`) is present, the default schema is the change-feed schema; otherwise it is the batch schema.
 - `readStream` with the batch default schema fails with an actionable message.
 - A batch read with change-feed options fails.
 - With an explicit `.schema(...)`, a stream defaults to LatestVersion.
@@ -330,8 +382,9 @@ converted safely. See README for the conversion table.
 - CI matrix: Python 3.10 to 3.13 with PySpark 4.0, 4.1 and 4.2 (the 4.2-only admission-control tests are skipped on 4.0 and 4.1), plus the lowest (4.14.0) and the highest allowed azure-cosmos.
 - Databricks engine compatibility (`tests/test_databricks_engine_compat.py`): a foreign copy of `pyspark.sql.types` reproduces the engine `StructType`. A subprocess loads a fake `_engine_pyspark`, strips client PySpark to the 4.0 API, and replays the engine runner's admission-control protocol (signature check, `asdict` limit wire format, `reportLatestOffset`, AvailableNow mixin). Without `_compat.py`, 7 of its 10 tests fail.
 - Local Spark (`tests/test_spark_local.py`): batch and AvailableNow stream through a real local SparkSession against the fake; runs where Java 17+ is available, and CI fails if it is skipped.
-- Initial snapshot (`tests/test_initial_snapshot.py`): batch-0-only snapshot rows, call order (start probes before any snapshot page; offsets logged first), replay before and after the batch-0 commit, both PySpark call orders, admission control with and without a cap, AvailableNow (also through the engine-protocol simulation), offsets without the snapshot field, a split between P0 and planning and one during the query, an empty batch 0, row schema and values, session-token enforcement against a lagging replica, the delay, the property-style convergence test and its sabotage check. Planning the snapshot from the start offset's field instead of the end offset fails 18 tests; dropping the session token in `read()` fails 4.
-- Integration (`tests/test_integration.py`, `-m integration`): configured by environment variables, against an Azure Cosmos DB account or an emulator. Every test creates and deletes its own containers and seeds its own data: batch reads with key auth, a user schema, a parameterized query, `auto` planning, a V1 sub-split, multi-partition batch reads and streams, offset stability, LatestVersion incremental reads and restarts, transactional-batch LSN grouping, caps and stream sub-splits, AVAD create/replace/delete and replay determinism, LatestVersion `initial_snapshot` under concurrent writes, and a local SparkSession batch and stream against the endpoint. The AVAD initial-snapshot test seeds 2,000 documents in a one-partition container, reads the snapshot over four EPK sub-ranges while a thread inserts, updates, deletes and re-creates documents, drains the feed with AvailableNow runs, and requires the merged result to equal the container; it also checks that every snapshot query carries the recorded session token and that a token ahead of the service is refused.
+- Initial snapshot (`tests/test_initial_snapshot.py`): batch-0-only snapshot rows, call order (start probes before any snapshot page; offsets logged first), replay before and after the batch-0 commit, both PySpark call orders, admission control with and without a cap, AvailableNow (also through the engine-protocol simulation) including the target move after batch 0, offsets without the snapshot field, a split between P0 and planning and one during the query, an empty batch 0, row schema and values, session-token enforcement against a lagging replica, the delay, the property-style convergence test and its sabotage check. Planning the snapshot from the start offset's field instead of the end offset fails 18 tests; dropping the session token in `read()` fails 4.
+- Snapshot streams (`tests/test_snapshot_stream.py`): offset shape and validation, mode mix-ups, one complete snapshot per batch with one `snapshot_ts`, one snapshot per AvailableNow run, interval gating on both PySpark paths, replays keep `seq` and `snapshot_ts`, a clock going back, container re-creation, session tokens against a lagging replica, splits between and during snapshots, user schemas, and the Databricks engine protocol in a subprocess. Stamping rows at read time, dropping the AvailableNow budget, the `_rid` check, the monotonic stamp or the per-start cache each fail at least one test.
+- Integration (`tests/test_integration.py`, `-m integration`): configured by environment variables, against an Azure Cosmos DB account or an emulator. Every test creates and deletes its own containers and seeds its own data: batch reads with key auth, a user schema, a parameterized query, `auto` planning, a V1 sub-split, multi-partition batch reads and streams, offset stability, LatestVersion incremental reads and restarts, transactional-batch LSN grouping, caps and stream sub-splits, AVAD create/replace/delete and replay determinism, LatestVersion `initial_snapshot` under concurrent writes, and a local SparkSession batch and stream against the endpoint. The AVAD initial-snapshot test seeds 2,000 documents in a one-partition container, reads the snapshot over four EPK sub-ranges while a thread inserts, updates, deletes and re-creates documents, and requires the merged result to equal the container after the first AvailableNow run; it also checks that every snapshot query carries the recorded session token and that a token ahead of the service is refused. The snapshot-stream test takes one snapshot per AvailableNow run on both PySpark protocol paths, replays a logged batch with its `snapshot_ts`, and re-creates the container.
 - Capability markers (`requires_avad`, `requires_epk_ranges`, `requires_multi_partition`, `requires_session_tokens`, `requires_aad`) skip what an endpoint cannot do. CI runs the suite against the Linux vNext emulator (no AVAD, no EPK sub-range filtering, one physical partition per container, no session-token enforcement) and the legacy Linux emulator (no AVAD), and against an account when its secrets are configured.
 
 ## 10. Known risks / not verified
@@ -345,4 +398,5 @@ converted safely. See README for the conversion table.
 7. **TTL deletes in AVAD** (`timeToLiveExpired`): mapped per documentation, not observed against the service.
 8. **`spark.sql.streaming.triggerAvailableNowWrapper.enabled=true` on PySpark 4.0/4.1** (internal, off by default): the wrapper calls `latestOffset()` before `setLatestSeenOffset` on a restart. With `max_items_per_trigger` set, the target can then be computed from a fresh start rather than the checkpoint, and the run fails. This combination is not supported. The default single-batch fallback and PySpark 4.2's native AvailableNow are fine.
 9. **Initial snapshot under weak consistency**: with ConsistentPrefix or Eventual consistency only the delay protects the snapshot from lagging replicas (best effort). The snapshot also assumes that a query run to completion returns every document not modified during it (the service's resume-key continuation); this is consistent with the integration tests but not documented by the service.
-10. **Regression-tested failure modes** (each has a test): batch-0 replay after a restart; SDK split widening of sub-range change-feed tokens; DECIMAL(38,s) with Python's 28-digit default context; access-token clients shared across principals; timestamp offsets >= 24h or out-of-range years under PERMISSIVE; a thread-unsafe split check in parallel start probes; mode validation on replay; the AvailableNow wrapper conf on PySpark 4.0/4.1 (documented above); PySpark 4.0/4.1 calling `latestOffset()` before `initialOffset()` on a new query.
+10. **Snapshot streams**: not point-in-time, like batch reads; a snapshot of an empty container has no rows and is invisible downstream; `snapshot_ts` uses the driver's wall clock, strictly increasing within a checkpoint but not across a checkpoint reset; with `snapshot_interval_seconds=0` a continuous stream reads the whole container in every micro-batch.
+11. **Regression-tested failure modes** (each has a test): batch-0 replay after a restart; SDK split widening of sub-range change-feed tokens; DECIMAL(38,s) with Python's 28-digit default context; access-token clients shared across principals; timestamp offsets >= 24h or out-of-range years under PERMISSIVE; a thread-unsafe split check in parallel start probes; mode validation on replay; the AvailableNow wrapper conf on PySpark 4.0/4.1 (documented above); PySpark 4.0/4.1 calling `latestOffset()` before `initialOffset()` on a new query.

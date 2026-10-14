@@ -57,7 +57,7 @@ Required, without defaults:
 
 Optional (see `databricks.yml` for all of them): the schema names, `customers_container` and
 `orders_container` (defaults `customers` and `orders`), `datasource_package` (default
-`cosmosdb-spark-datasource~=0.2.0`; a wheel path in a Unity Catalog volume also works),
+`cosmosdb-spark-datasource~=0.3.1`; a wheel path in a Unity Catalog volume also works),
 `auth_type` and the secret key names, `partitions_per_feed_range`, `priority` and
 `max_items_per_trigger`.
 
@@ -107,9 +107,9 @@ databricks bundle run cosmos_orders_latest
 databricks bundle run cosmos_orders_avad
 ```
 
-The first update of `cosmos_orders_avad` usually contains only the initial snapshot, because the
-AvailableNow target is captured before the stream's start position is resolved; changes made
-during it arrive with the next update. The first update of `cosmos_orders_latest` reads every
+The first update of `cosmos_orders_avad` reads the initial snapshot and then the changes made
+while it was read: the AvailableNow target, captured before the stream's start position is
+resolved, is moved once after the snapshot. The first update of `cosmos_orders_latest` reads every
 document through the change feed; set `max_items_per_trigger` to spread a large container over
 several micro-batches.
 

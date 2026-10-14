@@ -363,8 +363,9 @@ def test_engine_protocol_available_now_with_initial_snapshot(tmp_path: Path, sta
     """AvailableNow under the engine protocol: uncapped snapshot in batch 0, target reached, run terminates.
 
     The simulation captures the target after 200 documents, before ``initialOffset()`` (as Spark does), and
-    writes 30 more documents in between, so the snapshot holds all 230 documents. From Beginning the change
-    feed then delivers exactly d0..d199 (up to the target) in capped batches; from Now nothing follows.
+    writes 30 more documents in between, so the snapshot holds all 230 documents. After the snapshot the
+    target moves once to the current position: from Beginning the change feed then delivers d0..d229 in
+    capped batches; from Now (P0 after the 30 writes) nothing follows.
     """
     options = {"initial_snapshot": "true", "initial_snapshot_delay_seconds": "0", "start_from": start_from}
     result, _stderr = _simulate_engine(tmp_path, options)
@@ -373,5 +374,5 @@ def test_engine_protocol_available_now_with_initial_snapshot(tmp_path: Path, sta
     if start_from == "Now":
         assert result["batches"] == 1 and result["change_ids"] == []
     else:
-        assert result["change_ids"] == sorted(f"d{i}" for i in range(200))
-        assert result["batches"] >= 1 + 200 // 40
+        assert result["change_ids"] == sorted(f"d{i}" for i in range(230))
+        assert result["batches"] >= 1 + 230 // 40
