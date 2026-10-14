@@ -1,0 +1,69 @@
+[project]
+name = "cosmosdb-spark-datasource"
+version = "0.2.0"
+description = "PySpark Python data source for Azure Cosmos DB for NoSQL: parallel batch reads and change-feed streaming for Databricks serverless and Lakeflow Spark Declarative Pipelines."
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["spark", "pyspark", "databricks", "cosmosdb", "azure", "change-feed", "datasource"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+]
+# pyspark is intentionally not a runtime dependency: Databricks provides it.
+dependencies = [
+    # feed_range scoping for query_items arrived in 4.14; the change-feed continuation format used
+    # by this package was verified against 4.17.1.
+    "azure-cosmos>=4.14.0,<5",
+]
+
+[project.optional-dependencies]
+identity = [
+    "azure-identity>=1.19,<2",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "cosmosdb_datasource"
+
+[dependency-groups]
+dev = [
+    "azure-identity>=1.19",
+    "pyarrow>=25.0.1",
+    "pyspark>=4.0,<4.3",
+    "pytest>=9.1.1",
+    "ruff>=0.16.10",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "BLE", "S110"]
+ignore = [
+    "UP007",   # keep Optional/Union readable where used
+    "RUF012",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "BLE001", "B011"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Integration tests write to (dedicated) containers and consume RU: run them explicitly with
+# `uv run pytest -m integration` (a later -m on the command line overrides this default).
+addopts = "-m 'not integration'"
+markers = [
+    "integration: needs a real Cosmos DB account (config/cosmos.local.json); skipped otherwise",
+    "spark: needs a local SparkSession (Java 17+); skipped otherwise",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pyspark.*",
+]

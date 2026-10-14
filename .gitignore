@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tooling caches and reports
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit*.xml
+
+# Local configuration and credentials
+.env
+.env.*
+*.local.*
+
+# Databricks CLI / bundle state
+.databricks/
+
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
