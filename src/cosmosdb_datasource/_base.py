@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -23,12 +24,14 @@ from cosmosdb_datasource.auth import SecretToken, mint_driver_token
 from cosmosdb_datasource.options import AUTO, CosmosOptions
 from cosmosdb_datasource.retry import RetryPolicy, call_with_retry
 from cosmosdb_datasource.schema import RowBuilder, validate_schema
+from cosmosdb_datasource.throughput import RuBudget, ThrottledBackend
 
 logger = logging.getLogger("cosmosdb_datasource")
 
 _warned_sub_split = False  # the RU warning for sub-splitting is logged once per process
 
 _T = TypeVar("_T")
+_P = TypeVar("_P")
 
 
 class CosmosReaderBase:
@@ -72,8 +75,19 @@ class CosmosReaderBase:
             )
         return splits
 
-    def _backend(self, token: SecretToken | None) -> Any:
-        return client.get_backend(self._opts, token)
+    def _backend(self, token: SecretToken | None, partition: Any = None) -> Any:
+        backend = client.get_backend(self._opts, token)
+        budget = getattr(partition, "ru_budget", None)
+        return ThrottledBackend(backend, budget) if budget is not None else backend
+
+    def _with_budget(self, parts: list[_P]) -> list[_P]:
+        """Give every input partition an equal share of ``target_ru_per_second`` (one read, one budget)."""
+        target = self._opts.target_ru_per_second
+        if target and parts:
+            budget = RuBudget(uuid.uuid4().hex, target / len(parts))
+            for part in parts:
+                part.ru_budget = budget  # type: ignore[attr-defined]
+        return parts
 
     def _row_builder(self, *, snapshot: bool = False) -> RowBuilder:
         return RowBuilder(

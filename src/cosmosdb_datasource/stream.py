@@ -373,7 +373,7 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         if snapshot is not None:
             self._await_snapshot_delay()
         logger.info("cosmosdb micro-batch planned: %d partition(s)", len(parts))
-        return parts
+        return self._with_budget(parts)
 
     def _log_snapshot_decision(self, start: Offset, end: Offset) -> None:
         pending, planned = start.snapshot is not None, end.snapshot is not None
@@ -435,7 +435,7 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         started = time.monotonic()
         opts = self._opts
         mode = opts.change_feed_mode
-        backend = self._backend(partition.token)
+        backend = self._backend(partition.token, partition)
         builder = self._row_builder()
         pk = partition.pk
         rng = (partition.lo, partition.hi)
@@ -502,7 +502,7 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         stats = QueryStats()
         describe = f"range {epk.range_key(partition.lo, partition.hi)}"
         docs = query_documents(
-            self._backend(partition.token),
+            self._backend(partition.token, partition),
             SNAPSHOT_QUERY,
             None,
             (partition.lo, partition.hi),

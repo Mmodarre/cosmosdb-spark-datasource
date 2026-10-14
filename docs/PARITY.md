@@ -18,9 +18,9 @@ source).
 
 | Status | Rows |
 |---|---|
-| Supported | 23 |
-| Partially | 10 |
-| Missing | 8 |
+| Supported | 24 |
+| Partially | 11 |
+| Missing | 6 |
 | N/A | 4 |
 | Not verified | 1 |
 
@@ -82,10 +82,10 @@ transactional batch, point writes, serialization options and streaming writes
 
 | Capability | Connector | This data source | Notes |
 |---|---|---|---|
-| Local throughput control | `spark.cosmos.throughputControl.enabled`, `.name`, `.targetThroughput`, `.targetThroughputThreshold` | **Missing** | |
-| Global throughput control | `spark.cosmos.throughputControl.globalControl.*` (lease container) | **Missing** | |
+| Local throughput control | `spark.cosmos.throughputControl.enabled`, `.name`, `.targetThroughput`, `.targetThroughputThreshold` | **Partially**: `target_ru_per_second`, an RU/s budget per read, enforced by token buckets shared by a read's tasks on each executor | No `targetThroughputThreshold` (a fraction of the provisioned RU/s). A read capped at 20 RU/s ran at 18.8 RU/s. |
+| Global throughput control | `spark.cosmos.throughputControl.globalControl.*` (lease container) | **Missing** | Not provided: nothing coordinates budgets across reads or jobs. |
 | Priority-based execution | `spark.cosmos.throughputControl.priorityLevel` | **Supported**: `priority=Low` / `High` | No throughput-control group needed. |
-| Throughput buckets | `spark.cosmos.throughputControl.throughputBucket` | **Missing** | |
+| Throughput buckets | `spark.cosmos.throughputControl.throughputBucket` | **Supported**: `throughput_bucket` (1 to 5) on every request | |
 | Throttling (429) | SDK retries, `spark.cosmos.write.maxRetryCount` | **Supported**: `throttle_max_retries`, `throttle_max_wait_seconds`, `max_retries` with jittered backoff | |
 
 ## 6. Other

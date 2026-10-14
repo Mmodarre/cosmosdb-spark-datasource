@@ -33,8 +33,16 @@ def read_many(
     documents that do not exist are left out. The result has the batch-read schema, or ``schema``.
     """
     opts = parse_options(options)
+    unsupported = (
+        *STREAM_ONLY_OPTIONS,
+        "snapshot_stream",
+        "partition_key",
+        "item_ids",
+        "query",
+        "target_ru_per_second",
+    )
     given = {str(k).strip().lower() for k in options}
-    stray = [n for n in (*STREAM_ONLY_OPTIONS, "snapshot_stream", "partition_key", "item_ids", "query") if n in given]
+    stray = [n for n in unsupported if n in given]
     if stray:
         raise CosmosConfigError(f"read_many does not take option(s) {', '.join(stray)}.")
     if schema is None:

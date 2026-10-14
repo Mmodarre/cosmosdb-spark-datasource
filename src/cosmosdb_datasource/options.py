@@ -57,6 +57,7 @@ _CONSISTENCY_LEVELS = {
 DEFAULT_QUERY = "SELECT * FROM c"
 DEFAULT_PAGE_SIZE = 5000
 MAX_PREFETCH_PAGES = 4
+MAX_THROUGHPUT_BUCKET = 5  # the service's throughput buckets are numbered 1 to 5
 DEFAULT_RAW_COLUMN = "body"
 DEFAULT_CORRUPT_COLUMN = "_corrupt_record"
 DEFAULT_SAMPLING_SIZE = 1000
@@ -135,6 +136,8 @@ KNOWN_OPTIONS = frozenset(
         "arrow_batches",
         "partition_key",
         "item_ids",
+        "throughput_bucket",
+        "target_ru_per_second",
         "infer_schema",
         "sampling_size",
         "sampling_query",
@@ -282,6 +285,8 @@ class CosmosOptions:
     snapshot_interval_seconds: float = 0.0
     filter_pushdown: str = "false"  # "false" | "true" | "auto"
     prefetch_pages: int = 1
+    throughput_bucket: int | None = None
+    target_ru_per_second: float | None = None
     partition_key: str | None = None  # JSON of one logical partition key (or a hierarchical prefix)
     item_ids: tuple[tuple[str, str], ...] = ()  # (id, partition key as JSON)
     arrow_batches: str = AUTO  # "auto" | "true" | "false"
@@ -458,6 +463,24 @@ def _parse_item_ids(raw: str | None) -> tuple[tuple[str, str], ...]:
             raise CosmosConfigError(f"item_ids[{i}]: the id must be a non-empty string, got {item_id!r}.")
         out.append((item_id, json.dumps(key, ensure_ascii=False, separators=(",", ":"))))
     return tuple(out)
+
+
+def _throughput_bucket(opts: dict[str, str]) -> int | None:
+    value = _int(opts, "throughput_bucket", None, minimum=1)
+    if value is not None and value > MAX_THROUGHPUT_BUCKET:
+        raise CosmosConfigError(
+            f"Option 'throughput_bucket' must be between 1 and {MAX_THROUGHPUT_BUCKET}, got {value}."
+        )
+    return value
+
+
+def _target_ru(opts: dict[str, str]) -> float | None:
+    if _get(opts, "target_ru_per_second") is None:
+        return None
+    value = _float(opts, "target_ru_per_second", 0.0, minimum=0.0)
+    if value <= 0:
+        raise CosmosConfigError(f"Option 'target_ru_per_second' must be greater than 0, got {value}.")
+    return value
 
 
 def _prefetch_pages(opts: dict[str, str]) -> int:
@@ -651,6 +674,8 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
         prefetch_pages=_prefetch_pages(opts),
         partition_key=partition_key,
         item_ids=item_ids,
+        throughput_bucket=_throughput_bucket(opts),
+        target_ru_per_second=_target_ru(opts),
         arrow_batches=_parse_tristate(opts, "arrow_batches", AUTO),
         infer_schema=infer,
         sampling_size=_int(opts, "sampling_size", DEFAULT_SAMPLING_SIZE, minimum=1),  # type: ignore[arg-type]

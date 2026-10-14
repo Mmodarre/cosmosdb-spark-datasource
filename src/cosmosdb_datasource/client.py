@@ -59,6 +59,7 @@ def _client_key(opts: CosmosOptions) -> tuple[Any, ...]:
         opts.read_timeout_seconds,
         opts.throttle_max_retries,
         opts.throttle_max_wait_seconds,
+        opts.throughput_bucket,
     )
     return principal + settings
 
@@ -94,6 +95,8 @@ def _client_kwargs(opts: CosmosOptions) -> dict[str, Any]:
         kwargs["connection_timeout"] = opts.connection_timeout_seconds
     if opts.read_timeout_seconds:
         kwargs["read_timeout"] = opts.read_timeout_seconds
+    if opts.throughput_bucket:
+        kwargs["throughput_bucket"] = opts.throughput_bucket  # x-ms-cosmos-throughput-bucket on every request
     return kwargs
 
 
