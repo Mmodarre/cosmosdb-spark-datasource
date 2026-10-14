@@ -28,7 +28,6 @@ from cosmosdb_datasource.options import (
     AUTH_ACCESS_TOKEN,
     AUTH_DEFAULT,
     AUTH_KEY,
-    AUTH_SERVICE_CREDENTIAL,
     AUTH_SERVICE_PRINCIPAL,
     AuthOptions,
 )
@@ -88,44 +87,6 @@ def _identity_module() -> Any:
     return identity
 
 
-def _service_credential_provider(name: str) -> Any:
-    """Resolve a Unity Catalog service credential to an azure TokenCredential.
-
-    Tries, in order: ``databricks.service_credentials`` (documented for UDF/executor contexts),
-    ``pyspark.dbutils.DBUtils`` with the active session, and ``databricks.sdk.runtime.dbutils``.
-    """
-    attempts: list[str] = []
-    try:
-        import databricks.service_credentials as service_credentials  # type: ignore[import-not-found]
-
-        return service_credentials.getServiceCredentialsProvider(name)
-    except Exception as exc:  # noqa: BLE001
-        attempts.append(f"databricks.service_credentials: {type(exc).__name__}")
-    try:
-        from pyspark.dbutils import DBUtils  # type: ignore[import-not-found]
-        from pyspark.sql import SparkSession
-
-        spark = SparkSession.getActiveSession()
-        if spark is not None:
-            return DBUtils(spark).credentials.getServiceCredentialsProvider(name)
-        attempts.append("pyspark.dbutils: no active SparkSession")
-    except Exception as exc:  # noqa: BLE001
-        attempts.append(f"pyspark.dbutils: {type(exc).__name__}")
-    try:
-        from databricks.sdk.runtime import dbutils  # type: ignore[import-not-found]
-
-        return dbutils.credentials.getServiceCredentialsProvider(name)
-    except Exception as exc:  # noqa: BLE001
-        attempts.append(f"databricks.sdk.runtime.dbutils: {type(exc).__name__}")
-    raise CosmosAuthError(
-        f"Unity Catalog service credential {name!r} is not available in this Python process "
-        f"({'; '.join(attempts)}). Service credentials only work on Databricks compute with access to the "
-        "credential. Alternative: mint a token in the notebook with "
-        "dbutils.credentials.getServiceCredentialsProvider(name).get_token(scope) and pass it with "
-        "auth_type=access_token."
-    )
-
-
 def build_token_credential(auth: AuthOptions) -> Any:
     """Build the long-lived azure TokenCredential for the auth type (None for key / access_token)."""
     if auth.auth_type == AUTH_SERVICE_PRINCIPAL:
@@ -144,9 +105,6 @@ def build_token_credential(auth: AuthOptions) -> Any:
     if auth.auth_type == AUTH_DEFAULT:
         identity = _identity_module()
         return identity.DefaultAzureCredential(exclude_interactive_browser_credential=True)
-    if auth.auth_type == AUTH_SERVICE_CREDENTIAL:
-        assert auth.service_credential is not None
-        return _service_credential_provider(auth.service_credential)
     return None
 
 
@@ -210,7 +168,6 @@ def identity_key(auth: AuthOptions, endpoint: str) -> tuple[str, ...]:
         auth.auth_type,
         auth.tenant_id or "",
         auth.client_id or "",
-        auth.service_credential or "",
     )
 
 
@@ -241,7 +198,7 @@ class PartitionCredential:
     """azure TokenCredential used on executors.
 
     Serves the token minted on the driver while it is fresh; afterwards builds the configured
-    credential locally (service_principal, default, service_credential). For access_token there
+    credential locally (service_principal, default). For access_token there
     is no fallback and an expired token surfaces as a clear error.
     """
 
@@ -289,7 +246,7 @@ class PartitionCredential:
             return AccessToken(token.value, token.expires_on)
         raise CosmosAuthError(
             "The access_token supplied to the cosmosdb source has expired. Long-running reads need "
-            "auth_type=service_principal, service_credential or default so workers can refresh tokens."
+            "auth_type=service_principal or default so workers can refresh tokens."
         )
 
     def __repr__(self) -> str:

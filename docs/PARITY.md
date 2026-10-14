@@ -34,7 +34,7 @@ source).
 | Service principal, secret | `ServicePrincipal`, `spark.cosmos.auth.aad.clientId`, `.clientSecret`, `spark.cosmos.account.tenantId` (plus subscription and resource group) | **Supported**: `auth_type=service_principal`, `tenant_id`, `client_id`, `client_secret` | Data-plane RBAC only: no subscription or resource group. Unit-tested. |
 | Service principal, certificate | `spark.cosmos.auth.aad.clientCertPemBase64` | **Supported**: `client_certificate` (base64 PEM or PKCS#12), `client_certificate_password` | `CertificateCredential`; unit-tested with a real certificate, not against Entra ID. |
 | Managed identity | `ManagedIdentity`, optional `spark.cosmos.auth.aad.clientId` / `resourceId` | **Partially**: `auth_type=default` (`DefaultAzureCredential`, which includes managed identity) | Tested with the Azure CLI credential, not with a managed identity. |
-| Custom token provider | `AccessToken` with `spark.cosmos.accountDataResolverServiceName` (a JVM class) | **Supported**: `auth_type=access_token` (pre-minted token), `auth_type=service_credential` (Unity Catalog service credential) | |
+| Custom token provider | `AccessToken` with `spark.cosmos.accountDataResolverServiceName` (a JVM class) | **Partially**: `auth_type=access_token` (pre-minted token, for example from a Unity Catalog service credential on the driver; not refreshed) | Unity Catalog service credentials cannot be resolved where Spark plans Python data source reads, so `auth_type=service_credential` is rejected. |
 
 ## 2. Batch reads
 

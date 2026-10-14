@@ -69,6 +69,10 @@ First public release.
 - On runtimes without the streaming Python data source API (DBR 14.3 LTS, serverless environment
   1) the import failed with a bare `ImportError`. It now names the supported runtimes: PySpark 4.0
   or later, DBR 15.4 LTS or later, serverless environment version 2 or later.
+- `auth_type=service_credential` failed on every Databricks compute type: Spark plans Python data
+  source reads in worker processes where Unity Catalog service credentials cannot be resolved. The
+  option is now rejected at load time with the alternatives: a token minted from the service
+  credential on the driver (`auth_type=access_token`), or `auth_type=service_principal`.
 - After a container was deleted and re-created, a new stream (new checkpoint) failed on Python
   workers that had read the old container (`Invalid continuation: [Mismatch collection rid]`)
   until the workers restarted. A change-feed read now refreshes the client's cached container

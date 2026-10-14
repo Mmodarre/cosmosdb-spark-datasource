@@ -499,7 +499,7 @@ splits a backlog on PySpark 4.0 and 4.1, where `Trigger.AvailableNow` runs one c
 | `key` | account key | account key | n/a |
 | `service_principal` | `ClientSecretCredential` (or `CertificateCredential` with `client_certificate`) `.get_token(scope)` | shipped token | rebuild the same credential |
 | `default` | `DefaultAzureCredential` | shipped token | rebuild `DefaultAzureCredential` |
-| `service_credential` | `databricks.service_credentials.getServiceCredentialsProvider(name)`, then `pyspark.dbutils`, then `databricks.sdk.runtime.dbutils` | shipped token | same lookup on the worker |
+| `service_credential` | rejected at option parsing (below) | | |
 | `access_token` | caller's token (expiry from option or JWT `exp`) | shipped token | none: clear error when expired |
 
 Notes:
@@ -572,7 +572,7 @@ tests read with the inferred schema.
 ## 10. Known risks / not verified
 
 1. **Live partition split or merge** during streaming: covered by the fake and by reasoning from SDK code, not by the service. This includes the initial snapshot's session tokens after a split (parent token sent for child ranges).
-2. **Unity Catalog service credentials** inside Python data source workers on serverless/SDP (driver-side planner and executor processes): implemented with three lookups and a clear error, but **not run on Databricks**. `access_token` (minted in the notebook) is the documented fallback.
+2. **Unity Catalog service credentials** cannot be used by Python data sources on Databricks: Spark plans the reads (`partitions()`, `initialOffset()`, `latestOffset()`, `prepareForTriggerAvailableNow()`) in worker processes where `databricks.service_credentials` raises "can only be called in a Python UDF", `pyspark.dbutils` has no SparkSession and `databricks.sdk.runtime.dbutils` has no credentials (or, in standard access mode, may not read `~/.databrickscfg`); all three work only on the driver or in tasks (verified on serverless, classic dedicated and standard access mode). Executors could mint tokens, but planning needs one too, and the planner has no Databricks authentication to call the temporary-credential API with. `auth_type=service_credential` is therefore rejected with the alternatives: a token minted on the driver (`access_token`, no refresh) or a service principal.
 3. **PySpark on Databricks** is a fork. Serverless jobs (environment version 4) and SDP (DBR 18.3) use 4.2-style admission control with native AvailableNow, and serverless workers mix engine and client PySpark (§2), which `_compat.py` handles. Future runtimes may change this.
 4. **Continuation-token format coupling**: tokens are built in the SDK's persisted "v2" format. A future SDK that changes the format would be detected by `decode_positions` / SDK parsing errors (clear exception), not silently misread. Upgrades should run `tests/test_changefeed_offsets.py` and the integration suite.
 5. **`max_items_per_trigger` is an LSN budget**, not a row cap (bulk writes packed up to about 50 docs per LSN; a budget of 200 gave batches of about 2,158 rows).

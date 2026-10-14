@@ -84,12 +84,13 @@ The endpoint is always read from the secret scope (key `secret_key_endpoint`, de
 |---|---|
 | `key` (default) | the account key in the scope (key `secret_key_account_key`, default `account-key`) |
 | `service_principal` | `tenant_id`, and the client id and secret in the scope (`client-id`, `client-secret`) |
-| `service_credential` | `service_credential`, the name of a Unity Catalog service credential |
-| `default` | an identity that `DefaultAzureCredential` finds on the compute |
+| `service_credential` | `service_credential`, the name of a Unity Catalog service credential. The pipeline source mints a token from it on the driver and passes it as `access_token`; it is not refreshed, so an update must end within about one hour. |
+| `default` | an identity that `DefaultAzureCredential` finds on the compute; on Databricks it finds none (see the [README](../../README.md#authentication)) |
 
 Entra ID identities need a Cosmos DB data-plane role (for example *Cosmos DB Built-in Data
-Reader*). Only `key` has been run on Databricks; whether service credentials resolve inside Python
-data source workers on serverless compute has not been verified.
+Reader*). `service_principal` and a token minted from a service credential on the driver were run
+on Databricks serverless and classic compute; minting the token in a pipeline source file has not
+been verified.
 
 ```bash
 databricks secrets create-scope <scope>
