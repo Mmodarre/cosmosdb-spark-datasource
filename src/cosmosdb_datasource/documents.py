@@ -166,16 +166,16 @@ def to_change_record(item: Mapping[str, Any], mode: str, pk_info: PartitionKeyIn
             f"Change feed item without '{field}' (id={item.get('id')!r}); cannot bound the read deterministically."
         )
     if mode != MODE_ALL_VERSIONS_AND_DELETES:
-        doc = dict(item)
+        latest = dict(item)
         return ChangeRecord(
-            id=doc.get("id"),
-            pk=pk_info.extract(doc),
+            id=latest.get("id"),
+            pk=pk_info.extract(latest),
             operation=OP_UPSERT,
-            ts=_as_int(doc.get("_ts")),
+            ts=_as_int(latest.get("_ts")),
             lsn=lsn,
             crts=None,
             ttl_expired=False,
-            doc=doc,
+            doc=latest,
         )
     meta = item.get("metadata") or {}
     op = str(meta.get("operationType") or "").lower() or OP_UPSERT

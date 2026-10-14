@@ -1,0 +1,224 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.13.1"
+  TWINE_VERSION: "7.0.0"
+  FORCE_COLOR: "1"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+      - name: Check that uv.lock is up to date
+        run: uv lock --check
+      - name: ruff check
+        run: uv run --frozen --only-group lint ruff check --output-format=github
+      - name: ruff format
+        run: uv run --frozen --only-group lint ruff format --check
+
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+      - name: mypy
+        run: uv run --frozen mypy
+
+  test:
+    name: Test (Python ${{ matrix.python }}, PySpark ${{ matrix.pyspark }}, azure-cosmos ${{ matrix.azure-cosmos }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # PySpark 4.0, 4.1 and 4.2 all declare support for Python 3.10 to 3.13, so no combination
+        # is excluded.
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        pyspark: ["4.0", "4.1", "4.2"]
+        azure-cosmos: [locked]
+        include:
+          # Lowest and highest azure-cosmos allowed by pyproject.toml.
+          - python: "3.12"
+            pyspark: "4.2"
+            azure-cosmos: minimum
+          - python: "3.13"
+            pyspark: "4.2"
+            azure-cosmos: latest
+    env:
+      SPARK_LOCAL_IP: 127.0.0.1
+      COVERAGE_FILE: .coverage.py${{ matrix.python }}-pyspark${{ matrix.pyspark }}-${{ matrix.azure-cosmos }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-suffix: pyspark${{ matrix.pyspark }}
+          prune-cache: true
+      # The locked environment is installed without PySpark; each leg layers the PySpark (and,
+      # where requested, azure-cosmos) version under test on top with `uv run --with`.
+      - name: Install the locked environment without PySpark
+        run: uv sync --frozen --no-install-package pyspark
+      - name: Select the versions under test
+        env:
+          PYSPARK_MINOR: ${{ matrix.pyspark }}
+          COSMOS_LEG: ${{ matrix.azure-cosmos }}
+        run: |
+          echo "PYSPARK_REQ=pyspark==${PYSPARK_MINOR}.*" >> "$GITHUB_ENV"
+          compile() { uv pip compile pyproject.toml --no-deps --no-header --no-annotate --quiet "$@" | grep '^azure-cosmos=='; }
+          case "$COSMOS_LEG" in
+            locked) echo "COSMOS_REQ=" >> "$GITHUB_ENV" ;;
+            minimum) echo "COSMOS_REQ=$(compile --resolution lowest-direct)" >> "$GITHUB_ENV" ;;
+            latest) echo "COSMOS_REQ=$(compile)" >> "$GITHUB_ENV" ;;
+            *) echo "unknown azure-cosmos leg: $COSMOS_LEG" >&2; exit 1 ;;
+          esac
+      - name: Show and verify the versions under test
+        env:
+          PYSPARK_MINOR: ${{ matrix.pyspark }}
+        run: |
+          uv run --no-sync --with "$PYSPARK_REQ" ${COSMOS_REQ:+--with "$COSMOS_REQ"} python - <<'EOF'
+          import os
+          import sys
+
+          import azure.cosmos
+          import pyarrow
+          import pyspark
+
+          print(f"python {sys.version.split()[0]}, pyspark {pyspark.__version__}, "
+                f"azure-cosmos {azure.cosmos.__version__}, pyarrow {pyarrow.__version__}")
+          assert pyspark.__version__.startswith(os.environ["PYSPARK_MINOR"] + "."), pyspark.__version__
+          expected = os.environ.get("COSMOS_REQ", "").partition("==")[2]
+          assert not expected or azure.cosmos.__version__ == expected, azure.cosmos.__version__
+          EOF
+      - name: Run the unit and local Spark tests
+        run: |
+          uv run --no-sync --with "$PYSPARK_REQ" ${COSMOS_REQ:+--with "$COSMOS_REQ"} \
+            python -m pytest -ra --junitxml=junit.xml --cov --cov-report=term
+      - name: Check that the local Spark tests ran
+        run: uv run --no-sync python .github/scripts/check_junit.py junit.xml tests.test_spark_local
+      - name: Upload coverage data
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-data-py${{ matrix.python }}-pyspark${{ matrix.pyspark }}-${{ matrix.azure-cosmos }}
+          path: ${{ env.COVERAGE_FILE }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  coverage:
+    name: Coverage report
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: coverage-data-*
+          merge-multiple: true
+          path: coverage-data
+      - name: Combine and report
+        run: |
+          uv run --frozen --only-group coverage coverage combine coverage-data
+          uv run --frozen --only-group coverage coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+          uv run --frozen --only-group coverage coverage xml -o coverage.xml
+          uv run --frozen --only-group coverage coverage html -d htmlcov
+          uv run --frozen --only-group coverage coverage report
+      - name: Upload the coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            htmlcov/
+          if-no-files-found: error
+          retention-days: 30
+
+  build:
+    name: Build distributions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+      - name: Build the sdist and wheel
+        run: uv build
+      - name: twine check
+        run: uvx "twine@${TWINE_VERSION}" check --strict dist/*
+      - name: Check the distribution contents and metadata
+        run: uv run --no-project python .github/scripts/check_dist.py dist
+      - name: Upload the distributions
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  ci-passed:
+    name: CI passed
+    if: ${{ always() }}
+    needs: [lint, typecheck, test, coverage, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to succeed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for result in $RESULTS; do
+            [ "$result" = "success" ] || exit 1
+          done
