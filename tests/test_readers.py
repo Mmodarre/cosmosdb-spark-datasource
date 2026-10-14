@@ -122,7 +122,7 @@ def test_batch_partitions_carry_redacted_tokens(make_store) -> None:
 
 def test_mode_selection_errors(make_store) -> None:
     store = make_store()
-    ds = make_source(fake_options(store, change_feed_mode="LatestVersion"))
+    ds = make_source(fake_options(store, change_feed_mode="LatestVersion", initial_snapshot="true"))
     with pytest.raises(CosmosConfigError, match=r"only apply to spark\.readStream"):
         ds.reader(ds.schema())
     batch_ds = make_source(fake_options(store))

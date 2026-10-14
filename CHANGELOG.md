@@ -10,6 +10,11 @@ First public release.
 
 ### Added
 
+- Change feed as a batch read: `spark.read` with change-feed options reads the changes between two
+  positions (`start_from` or a checkpoint, to now or `end_at`), capped by `max_items_per_trigger`.
+  With `batch_checkpoint_location`, a read replays its range until `commit_batch_checkpoint()`
+  marks it written, and reports whether it caught up, so capped reads in a loop work through a
+  backlog on PySpark 4.0 and 4.1.
 - Throughput control: `throughput_bucket` sends every request in a throughput bucket, and
   `target_ru_per_second` caps a read (or a micro-batch) with token buckets that its tasks share
   per executor, charged with each page's request charge. There is no global, cross-job control.

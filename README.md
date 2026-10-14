@@ -301,6 +301,8 @@ events = read_many(wanted, id_column="id", pk_column="deviceId", **conn, contain
 | `partitions_per_feed_range` | `1` | EPK sub-splitting of change-feed reads (an integer; `auto` means 1). The initial snapshot is split like a batch read. |
 | `page_size` | `5000` | Maximum change-feed items per request |
 | `change_feed_end_wait_seconds` | `120` | How long a task waits for a lagging replica to reach the micro-batch's end LSN before it fails (Spark then retries the task) |
+| `end_at` | | Batch reads only: read the changes before this ISO-8601 time (LatestVersion) |
+| `batch_checkpoint_location` | | Batch reads only: continue from the last committed read; see [Change feed as a batch read](#change-feed-as-a-batch-read) |
 | `mode`, `raw_json_column`, `corrupt_record_column`, `log_metrics` | as above | |
 
 `query` is rejected for change-feed streams; filter the stream in Spark.
@@ -353,9 +355,10 @@ TIMESTAMP_NTZ or STRING).
 Spark does not tell a data source whether `read` or `readStream` asks for its default schema, so
 `snapshot_stream=true` selects the snapshot-stream schema, and the change-feed schema is used
 whenever a change-feed option (`change_feed_mode`, `start_from`, `max_items_per_trigger`,
-`initial_snapshot`, `initial_snapshot_delay_seconds`) is set. A `readStream` without those options
-and without an explicit schema fails with an explanatory error, and so does a batch `read` with
-them.
+`initial_snapshot`, `initial_snapshot_delay_seconds`, `end_at`, `batch_checkpoint_location`) is set.
+A batch `read` with them reads the change feed ([Change feed as a batch read](#change-feed-as-a-batch-read)).
+A `readStream` without those options and without an explicit schema fails with an explanatory
+error.
 
 ### Partition key rendering
 
@@ -538,6 +541,46 @@ Entra ID works.
   its start, then stops (observed on Databricks serverless jobs and SDP, DBR 18.3). With
   `initial_snapshot`, that position is moved once, right after the snapshot (see
   [Initial snapshot](#initial-snapshot)).
+- To work through a large backlog in capped steps in one job on PySpark 4.0 and 4.1 (DBR 17.3),
+  loop over [batch reads with a checkpoint](#change-feed-as-a-batch-read) instead.
+
+### Change feed as a batch read
+
+`spark.read` with change-feed options reads the changes between two positions per feed range,
+with the schema and rows of a change-feed stream: from `start_from`, or from where the last
+committed read of `batch_checkpoint_location` ended, to the position at planning, or to the last
+change before `end_at` (LatestVersion only). `max_items_per_trigger` caps one read (an LSN budget).
+
+```python
+from cosmosdb_datasource import commit_batch_checkpoint
+
+location = "/Volumes/<catalog>/<schema>/<volume>/orders_cf"
+while True:
+    changes = (
+        spark.read.format("cosmosdb")
+        .options(**conn, container="orders", change_feed_mode="LatestVersion", batch_checkpoint_location=location)
+        .option("max_items_per_trigger", "100000")
+        .load()
+    )
+    changes.write.mode("append").saveAsTable("<catalog>.<schema>.orders_changes")
+    if commit_batch_checkpoint(location):  # True once a read reached the position it was planned to reach
+        break
+```
+
+- A read plans its range into `offsets/<n>` before reading. Until `commit_batch_checkpoint` writes
+  `commits/<n>`, every read with the checkpoint reads that range again, so a failed job repeats
+  the same changes (at least once; use an idempotent sink or `MERGE` for exactly once). Spark
+  gives a batch read no signal after its output is written, so the commit is the job's call.
+- The checkpoint is a directory the driver opens with Python file APIs: a local path, or
+  `/Volumes/...` or `/dbfs/...` on Databricks (`dbfs:/` is mapped to `/dbfs/`). Use one job per
+  checkpoint. A checkpoint of another container instance or change-feed mode is rejected.
+- Without a checkpoint, a read is one bounded range. `AllVersionsAndDeletes` starts at `Now`, so it
+  needs a checkpoint: the first read is empty and later reads return the changes since.
+- Measured on an account: after 300 creates and 5 deletes, capped reads of 100 LSNs returned the
+  295 live documents in 4 reads; an `AllVersionsAndDeletes` read returned 300 creates and 5
+  deletes.
+- `initial_snapshot` belongs to streams and is rejected; `end_at` and `batch_checkpoint_location`
+  are rejected by `readStream`, which keeps its position in its own checkpoint.
 
 ### Keys and ordering for CDC
 
@@ -717,7 +760,8 @@ throughput for that.
 | Message | Cause and fix |
 |---|---|
 | `spark.readStream.format('cosmosdb') needs the change-feed schema` | Set `change_feed_mode` on the stream |
-| `... only apply to spark.readStream` | Remove `change_feed_mode`, `start_from`, `max_items_per_trigger` and the snapshot options from the batch read |
+| `... only apply to spark.readStream` | Remove `initial_snapshot`, `initial_snapshot_delay_seconds` and `snapshot_stream` from the batch read |
+| `The batch checkpoint has no planned read to commit` | `commit_batch_checkpoint` was called before a read with that `batch_checkpoint_location` was planned |
 | `The checkpointed offset belongs to a different container instance` | The container was re-created; use a new checkpoint |
 | `checkpoint was created with change_feed_mode=...` | The mode changed; use a new checkpoint |
 | `Option(s) ... cannot be combined with snapshot_stream=true` | Remove the change-feed options from the snapshot stream |

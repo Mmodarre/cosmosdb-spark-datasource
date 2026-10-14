@@ -74,6 +74,10 @@ STREAM_ONLY_OPTIONS = (
     "initial_snapshot_delay_seconds",
 )
 DEFAULT_INITIAL_SNAPSHOT_DELAY_SECONDS = 5.0
+# Change-feed options of batch reads only; they select the change-feed schema too.
+CHANGE_FEED_BATCH_OPTIONS = ("end_at", "batch_checkpoint_location")
+# Change-feed options that a batch read rejects: an initial snapshot belongs to a stream.
+STREAM_SNAPSHOT_OPTIONS = ("initial_snapshot", "initial_snapshot_delay_seconds")
 
 # Change-feed options that a snapshot stream (snapshot_stream=true) rejects: it reads the whole
 # container in every micro-batch.
@@ -138,6 +142,8 @@ KNOWN_OPTIONS = frozenset(
         "item_ids",
         "throughput_bucket",
         "target_ru_per_second",
+        "end_at",
+        "batch_checkpoint_location",
         "infer_schema",
         "sampling_size",
         "sampling_query",
@@ -296,6 +302,9 @@ class CosmosOptions:
     infer_system_properties: bool = False
     infer_timestamp: bool = False
     stream_options_present: tuple[str, ...] = ()
+    batch_change_feed_options_present: tuple[str, ...] = ()
+    end_at: str | None = None  # ISO-8601, UTC
+    batch_checkpoint_location: str | None = None
     query_explicit: bool = False
     test_backend: str | None = None
 
@@ -465,6 +474,17 @@ def _parse_item_ids(raw: str | None) -> tuple[tuple[str, str], ...]:
     return tuple(out)
 
 
+def _parse_end_at(raw: str | None, mode: str) -> str | None:
+    if raw is None:
+        return None
+    if mode != MODE_LATEST_VERSION:
+        raise CosmosConfigError(
+            "Option 'end_at' needs change_feed_mode=LatestVersion: the service resolves a point in time only "
+            "in the LatestVersion change feed."
+        )
+    return parse_timestamp_option("end_at", raw).isoformat()
+
+
 def _throughput_bucket(opts: dict[str, str]) -> int | None:
     value = _int(opts, "throughput_bucket", None, minimum=1)
     if value is not None and value > MAX_THROUGHPUT_BUCKET:
@@ -596,7 +616,7 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
     infer = _bool(opts, "infer_schema", False)
     if infer:
         streaming = [
-            *(n for n in STREAM_ONLY_OPTIONS if _get(opts, n) is not None),
+            *(n for n in (*STREAM_ONLY_OPTIONS, *CHANGE_FEED_BATCH_OPTIONS) if _get(opts, n) is not None),
             *(["snapshot_stream"] if snapshot_stream else []),
         ]
         if streaming:
@@ -614,7 +634,7 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
     if partition_key is not None or item_ids:
         given = [n for n in ("partition_key", "item_ids") if _get(opts, n) is not None]
         streaming = [
-            *(n for n in STREAM_ONLY_OPTIONS if _get(opts, n) is not None),
+            *(n for n in (*STREAM_ONLY_OPTIONS, *CHANGE_FEED_BATCH_OPTIONS) if _get(opts, n) is not None),
             *(["snapshot_stream"] if snapshot_stream else []),
         ]
         if len(given) > 1:
@@ -683,6 +703,9 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
         infer_system_properties=_bool(opts, "infer_system_properties", False),
         infer_timestamp=_bool(opts, "infer_timestamp", False),
         stream_options_present=tuple(n for n in STREAM_ONLY_OPTIONS if _get(opts, n) is not None),
+        batch_change_feed_options_present=tuple(n for n in CHANGE_FEED_BATCH_OPTIONS if _get(opts, n) is not None),
+        end_at=_parse_end_at(_get(opts, "end_at"), cf_mode),
+        batch_checkpoint_location=_get(opts, "batch_checkpoint_location"),
         query_explicit=query is not None,
         test_backend=test_backend,
     )

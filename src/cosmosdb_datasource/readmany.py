@@ -13,7 +13,7 @@ from cosmosdb_datasource.arrow import record_batches
 from cosmosdb_datasource.auth import mint_driver_token
 from cosmosdb_datasource.documents import PartitionKeyInfo
 from cosmosdb_datasource.errors import CosmosConfigError
-from cosmosdb_datasource.options import STREAM_ONLY_OPTIONS, parse_options
+from cosmosdb_datasource.options import CHANGE_FEED_BATCH_OPTIONS, STREAM_ONLY_OPTIONS, parse_options
 from cosmosdb_datasource.point_reads import ITEMS_PER_REQUEST
 from cosmosdb_datasource.schema import RecordView, RowBuilder, batch_schema, validate_schema
 
@@ -35,6 +35,7 @@ def read_many(
     opts = parse_options(options)
     unsupported = (
         *STREAM_ONLY_OPTIONS,
+        *CHANGE_FEED_BATCH_OPTIONS,
         "snapshot_stream",
         "partition_key",
         "item_ids",

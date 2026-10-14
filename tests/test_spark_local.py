@@ -171,3 +171,22 @@ def test_partition_key(spark) -> None:
     scoped = spark.read.format("cosmosdb").options(**fake_options(store, partition_key="p1")).load()
     assert scoped.rdd.getNumPartitions() == 1
     assert sorted(r.id for r in scoped.collect()) == sorted(f"d{i}" for i in range(200) if i % 31 == 1)
+
+
+def test_change_feed_batch_reads_with_a_checkpoint(spark, tmp_path: Path) -> None:
+    from cosmosdb_datasource import commit_batch_checkpoint
+
+    store = _store("spark_cf_batch", partitions=2, docs=120)
+    location = str(tmp_path / "cf")
+    options = fake_options(
+        store, change_feed_mode="LatestVersion", batch_checkpoint_location=location, max_items_per_trigger="50"
+    )
+    out = str(tmp_path / "out")
+    reads = 0
+    while reads < 10:
+        spark.read.format("cosmosdb").options(**options).load().write.mode("append").parquet(out)
+        reads += 1
+        if commit_batch_checkpoint(location):
+            break
+    written = spark.read.parquet(out)
+    assert reads >= 3 and written.count() == 120 and written.select("id").distinct().count() == 120
