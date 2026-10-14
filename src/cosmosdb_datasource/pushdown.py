@@ -387,9 +387,10 @@ class CosmosPushdownBatchReader(CosmosBatchReader):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._pushed: tuple[str, tuple[tuple[str, Any], ...]] | None = None  # query, generated parameters
+        self._pushed_keys: tuple[str, ...] | None = None  # partition keys (JSON) an exact pk filter allows
 
     def pushFilters(self, filters: list[Any]) -> Iterable[Any]:
-        if not filters:
+        if not filters or self._opts.item_ids:  # point reads run no query to add the filters to
             return filters
         simple = parse_simple_query(self._opts.query)
         if simple is None:
@@ -426,6 +427,8 @@ class CosmosPushdownBatchReader(CosmosBatchReader):
                 conditions.append(pred.sql)
             if not pred.exact:
                 remaining.append(flt)
+            else:
+                self._narrow_keys(flt)
         if conditions:
             where = " AND ".join(f"({c})" for c in ([simple.where] if simple.where else []) + conditions)
             query = f"{simple.head} WHERE {where}"
@@ -444,6 +447,26 @@ class CosmosPushdownBatchReader(CosmosBatchReader):
                 query,
             )
         return remaining
+
+    def _narrow_keys(self, flt: Any) -> None:
+        # An exact pk = 'v' or pk IN (...) limits the read to those logical partitions, each read routed
+        # by key instead of scanning every physical partition's index.
+        if getattr(flt, "attribute", None) not in (("pk",), ["pk"]):
+            return
+        kind = type(flt).__name__
+        if kind == "EqualTo":
+            values = [flt.value]
+        elif kind == "In":
+            values = [v for v in flt.value if v is not None]
+        else:
+            return
+        keys = {json.dumps(v, ensure_ascii=False, separators=(",", ":")) for v in values}
+        self._pushed_keys = tuple(sorted(keys if self._pushed_keys is None else keys & set(self._pushed_keys)))
+
+    def _partition_keys(self) -> list[str]:
+        if self._opts.partition_key is not None or self._pushed_keys is None:
+            return super()._partition_keys()
+        return list(self._pushed_keys)
 
     def _partition_key_info(self) -> PartitionKeyInfo:
         backend = self._driver_backend(self._driver_token())

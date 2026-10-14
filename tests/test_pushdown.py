@@ -335,7 +335,8 @@ def test_user_query_and_parameters_are_combined(make_store) -> None:
     rows, _parts, remaining = run_batch_with_filters(opts, SCHEMA, [EqualTo(("pk",), "p3"), LessThan(("n",), 50)])
     assert remaining == [LessThan(("n",), 50)]
     assert sorted(r[0] for r in rows) == ["d31", "d38", "d45"]
-    assert sum(e[4] for e in store.call_log if e[0] == "query_page") == 3
+    # pk = 'p3' is exact: one logical partition, read routed by key
+    assert [e[0] for e in store.call_log] == ["partition_query_page"] and store.call_log[0][2] == 3
 
 
 def test_parameters_of_dropped_sub_filters_are_not_sent(make_store) -> None:
@@ -529,5 +530,6 @@ def test_pushdown_returns_what_spark_filtering_returns(make_store, seed: int, mo
         rows, _parts, remaining = run_batch_with_filters(pushdown_options(store, mode=mode), SCHEMA, filters)
         got = sorted(repr(r) for r in rows if all(spark_eval(f, r) is True for f in remaining))
         assert got == expected, filters
-        pushed_any += sum(e[4] for e in store.call_log if e[0] == "query_page") < len(all_rows)
+        pages = [e for e in store.call_log if e[0] in ("query_page", "partition_query_page")]
+        pushed_any += sum(e[-1] for e in pages) < len(all_rows)
     assert pushed_any > 5  # the filters did reduce what the service returned

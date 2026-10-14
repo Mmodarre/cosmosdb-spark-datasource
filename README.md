@@ -211,6 +211,8 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `infer_schema` | `false` | Infer the schema from a sample of documents instead of returning raw JSON; batch reads only. See [Schema inference](#schema-inference). |
 | `sampling_size`, `sampling_query` | `1000`, `query` | Documents sampled for `infer_schema`, and the query that samples them (with `query_parameters`) |
 | `infer_system_properties`, `infer_timestamp` | `false` | Include `_rid`, `_self`, `_etag`, `_attachments` and `_ts` (`infer_timestamp`: `_ts` only) in the inferred schema |
+| `partition_key` | | Read one logical partition: the key as JSON (`"dev-1"`, `42`, `["tenant1","user7"]` or a prefix such as `["tenant1"]` of a hierarchical key); text that is not JSON is a string key. See [Logical partitions and point reads](#logical-partitions-and-point-reads). |
+| `item_ids` | | Read given documents: a JSON list of `["id", pk]` pairs or `{"id": ..., "pk": ...}` objects |
 | `filter_pushdown` | `false` | `true`: push Spark filters into the query (PySpark 4.1+; needs `spark.sql.python.filterPushdown.enabled=true`, else planning fails with `DATA_SOURCE_PUSHDOWN_DISABLED`). `auto`: push only while that conf is true. See [Filter pushdown](#filter-pushdown). |
 
 ### Filter pushdown
@@ -258,6 +260,32 @@ critical = (
 - PySpark 4.0 has no pushdown API, and the option does nothing there. Where the conf cannot be set
   (Databricks serverless restricts Spark confs), `auto` reads without pushdown and `true` fails.
   The generated query is logged at INFO (without parameter values).
+
+### Logical partitions and point reads
+
+`partition_key` reads one logical partition as one task, with the query routed by partition key;
+`query` still applies. `item_ids` reads given documents with point reads (`read_items`), one task
+per physical partition that holds some of them; ids that do not exist return no row. For many
+identities, `read_many` reads those listed in a DataFrame:
+
+```python
+from cosmosdb_datasource import read_many
+
+one_device = spark.read.format("cosmosdb").options(**conn, container="events", partition_key="dev-0000001").load()
+wanted = spark.table("lookups").select("id", "deviceId")  # the key in its JSON type
+events = read_many(wanted, id_column="id", pk_column="deviceId", **conn, container="events")
+```
+
+- With [filter pushdown](#filter-pushdown), `pk = 'v'` and `pk IN (...)` with string keys read only
+  those logical partitions, the same way.
+- Measured on an account (1M documents, 7 physical partitions): one logical partition of 50
+  documents cost 4.3 RU as one task; 1,000 `item_ids` cost 301 RU. A query scoped by the key's
+  EPK range instead (`feed_range_from_partition_key`) scans the whole physical partition: 2,386 RU.
+- `read_many` returns the batch-read schema or `schema=` (a `StructType` or DDL), runs as a
+  `mapInArrow` over the identities (which needs pandas, as Spark's `mapInArrow` does), and reads up
+  to 1,000 identities per request. Repeated identities are read once per Arrow batch.
+- A prefix of a hierarchical key can span several physical partitions; the service then scans
+  them.
 
 ### Streaming reads (change feed)
 

@@ -211,6 +211,23 @@ with the conf off and on through a local SparkSession (PySpark 4.0, 4.1, 4.2) an
 exact filter leaves Spark's plan; the integration test runs the property test against the
 endpoint (also run against an account: 60 filter sets agreed).
 
+### Logical partitions and point reads
+
+`partition_key` plans one `CosmosLogicalPartition` per full key (a prefix of a hierarchical key is
+read as its EPK range in each physical partition it overlaps, like a sub-split read); its read goes through
+`batch.query_documents` with a backend view (`point_reads.KeyRouted`) whose queries are
+`query_items(partition_key=...)`, routed by key, and whose single feed range covers the key space,
+so the loop's split detection never re-scopes it (the service routes a key-routed continuation
+across a split). Verified (service, 1M documents in 7 partitions, hash V1): the key-routed query
+of a 50-document logical partition cost 4.33 RU; the same query with the key's feed range
+(`feed_range_from_partition_key`, an inclusive EPK point range) cost 2,385.8 RU, a scan of the
+physical partition, as for EPK sub-ranges (§4, "EPK sub-splitting"). `item_ids` are grouped by the
+feed range holding `feed_range_from_partition_key(pk).min` (computed from the cached container
+properties, no request) and read with `read_items` in chunks of 1,000, retried as a whole on
+transient errors; `read_items` reads a chunk with one query per physical partition (1,000 items
+for 301 RU). `read_many` runs the same read in `mapInArrow`, minting the token on the driver.
+A pushed exact `pk` equality or `IN` (§4, "Filter pushdown") sets the keys to read.
+
 ### EPK sub-splitting correctness
 
 For any total order and any boundaries `lo < p1 < ... < pk < hi`, the half-open intervals

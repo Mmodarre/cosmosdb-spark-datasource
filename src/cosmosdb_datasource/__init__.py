@@ -10,6 +10,7 @@ from cosmosdb_datasource.errors import (
     CosmosDataSourceError,
     CosmosOffsetError,
 )
+from cosmosdb_datasource.readmany import read_many
 
 __all__ = [
     "CosmosAuthError",
@@ -20,4 +21,5 @@ __all__ = [
     "CosmosDataSourceError",
     "CosmosOffsetError",
     "__version__",
+    "read_many",
 ]

@@ -6,6 +6,7 @@ The planning helper (:func:`split_feed_ranges`) and the resumable query loop
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -212,24 +213,63 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
                 "DISTINCT, TOP/OFFSET and aggregates apply per partition, not globally. Do them in Spark."
             )
 
-    def partitions(self) -> list[CosmosQueryPartition]:
+    def partitions(self) -> list[InputPartition]:
+        from cosmosdb_datasource.point_reads import CosmosItemsPartition, CosmosLogicalPartition, group_items
+
         started = time.monotonic()
         token = self._driver_token()
         backend = self._driver_backend(token)
         props = self._driver_call("reading container properties", lambda: backend.properties(refresh=True))
         pk = PartitionKeyInfo.from_container_properties(props)
         ranges = self._driver_call("reading feed ranges", lambda: backend.feed_ranges(force_refresh=True))
-        splits = self._splits_per_range()
-        parts = [
-            CosmosQueryPartition(i, lo, hi, epk.range_key(*feed), pk, token)
-            for i, (feed, (lo, hi)) in enumerate(split_feed_ranges(ranges, splits, pk))
-        ]
+        keys = self._partition_keys()
+        parts: list[InputPartition]
+        if self._opts.item_ids:
+            groups = group_items(self._opts.item_ids, ranges, backend.key_epk)
+            parts = [
+                CosmosItemsPartition(i, epk.range_key(*feed), items, pk, token)
+                for i, (feed, items) in enumerate(groups)
+            ]
+        elif keys:
+            parts = []
+            for key in keys:
+                value = json.loads(key)
+                if isinstance(value, list) and len(value) < len(pk.paths):
+                    # A prefix of a hierarchical key can span physical partitions: read its EPK range
+                    # in each of them, like any other read scoped by EPK range.
+                    lo, hi = backend.key_range(value)
+                    for r_lo, r_hi in ranges:
+                        if r_lo < hi and lo < r_hi:
+                            feed = epk.range_key(r_lo, r_hi)
+                            parts.append(
+                                CosmosQueryPartition(len(parts), max(lo, r_lo), min(hi, r_hi), feed, pk, token)
+                            )
+                    continue
+                point = backend.key_epk(value)
+                feed = next((epk.range_key(r_lo, r_hi) for r_lo, r_hi in ranges if r_lo <= point < r_hi), "")
+                parts.append(CosmosLogicalPartition(len(parts), key, feed, pk, token))
+        else:
+            splits = self._splits_per_range()
+            parts = [
+                CosmosQueryPartition(i, lo, hi, epk.range_key(*feed), pk, token)
+                for i, (feed, (lo, hi)) in enumerate(split_feed_ranges(ranges, splits, pk))
+            ]
         self._log_metrics("batch planning", started, feed_ranges=len(ranges), partitions=len(parts))
         logger.info("cosmosdb batch read planned: %d feed range(s), %d partition(s)", len(ranges), len(parts))
         return parts
 
     def _query(self) -> tuple[str, list[dict[str, Any]] | None]:
         return self._opts.query, self._opts.parameters_for_sdk()
+
+    def _partition_keys(self) -> list[str]:
+        """Logical partitions to read instead of the whole container (partition keys as JSON)."""
+        return [self._opts.partition_key] if self._opts.partition_key is not None else []
+
+    def _feed_range_of(backend: Any, ranges: Sequence[tuple[str, str]], pk: PartitionKeyInfo, key: str) -> str:
+        if len(pk.paths) > 1 and len(json.loads(key)) < len(pk.paths):
+            return ""  # a prefix of a hierarchical key can span several physical partitions
+        point = backend.key_epk(json.loads(key))
+        return next((epk.range_key(lo, hi) for lo, hi in ranges if lo <= point < hi), "")
 
     def read(self, partition: InputPartition | None) -> Iterator[Any]:
         rows = self._read_rows(partition)
@@ -244,19 +284,29 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
         return setting == "true" or (setting == AUTO and not _compat.engine_loaded())
 
     def _read_rows(self, partition: InputPartition | None) -> Iterator[tuple[Any, ...]]:
+        from cosmosdb_datasource.point_reads import CosmosItemsPartition, CosmosLogicalPartition, KeyRouted
+
         if partition is None:  # Spark substitutes [None] for an empty partition list
+            return
+        if isinstance(partition, CosmosItemsPartition):
+            yield from self._read_items(partition)
             return
         partition = cast(CosmosQueryPartition, partition)
         started = time.monotonic()
         opts = self._opts
         builder = self._row_builder()
         pk = partition.pk
-        describe = f"range {epk.range_key(partition.lo, partition.hi)}"
+        backend = self._backend(partition.token)
+        if isinstance(partition, CosmosLogicalPartition):
+            backend = KeyRouted(backend, partition.key)
+            describe = f"logical partition {partition.key_json}"
+        else:
+            describe = f"range {epk.range_key(partition.lo, partition.hi)}"
         stats = QueryStats()
         rows = 0
         query, parameters = self._query()
         docs = query_documents(
-            self._backend(partition.token),
+            backend,
             query,
             parameters,
             (partition.lo, partition.hi),
@@ -285,4 +335,32 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
             retries=stats.retries,
             replans=stats.replans,
             duplicates=stats.duplicates,
+        )
+
+    def _read_items(self, partition: Any) -> Iterator[tuple[Any, ...]]:
+        from cosmosdb_datasource.point_reads import chunks
+
+        started = time.monotonic()
+        builder = self._row_builder()
+        backend = self._backend(partition.token)
+        pk = partition.pk
+        describe = f"items of range {partition.feed_range}"
+        found = 0
+        charge = 0.0
+        for chunk in chunks(partition.items):
+
+            def read(chunk: list[tuple[str, Any]] = chunk) -> tuple[list[dict[str, Any]], float]:
+                return backend.read_items(chunk)
+
+            docs, request_charge = retry.call_with_retry(read, self._retry_policy(), f"reading the {describe}")
+            charge += request_charge
+            for doc in docs:
+                found += 1
+                row = builder.build(
+                    RecordView(doc, id=doc.get("id"), pk=pk.render(doc), feed_range=partition.feed_range)
+                )
+                if row is not None:
+                    yield row
+        self._log_metrics(
+            f"read of the {describe}", started, items=len(partition.items), found=found, request_charge=charge
         )
