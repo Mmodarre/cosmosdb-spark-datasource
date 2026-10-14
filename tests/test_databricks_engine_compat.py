@@ -32,7 +32,7 @@ from cosmosdb_datasource.errors import CosmosConfigError
 from cosmosdb_datasource.options import TEST_HOOKS_ENV
 from cosmosdb_datasource.schema import batch_schema, change_feed_schema
 from tests.conftest import fake_options
-from tests.harness import StreamHarness, make_source, validate_rows
+from tests.harness import StreamHarness, as_rows, make_source, validate_rows
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -83,8 +83,9 @@ def test_batch_reader_accepts_engine_struct_type(make_store) -> None:
     ds = make_source(fake_options(store))
     reader = ds.reader(engine_schema)
     assert reader._schema == batch_schema()
-    rows = [row for part in reader.partitions() for row in reader.read(part)]
-    validate_rows(rows, batch_schema(), ds)  # the engine validates with its own (equivalent) types
+    output = [item for part in reader.partitions() for item in reader.read(part)]
+    validate_rows(output, batch_schema(), ds)  # the engine validates with its own (equivalent) types
+    rows = as_rows(output, batch_schema())
     assert sorted(r[0] for r in rows) == sorted(f"d{i}" for i in range(10))
 
 

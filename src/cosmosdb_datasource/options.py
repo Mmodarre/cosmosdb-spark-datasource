@@ -55,7 +55,8 @@ _CONSISTENCY_LEVELS = {
 }
 
 DEFAULT_QUERY = "SELECT * FROM c"
-DEFAULT_PAGE_SIZE = 1000
+DEFAULT_PAGE_SIZE = 5000
+MAX_PREFETCH_PAGES = 4
 DEFAULT_RAW_COLUMN = "body"
 DEFAULT_CORRUPT_COLUMN = "_corrupt_record"
 DEFAULT_SAMPLING_SIZE = 1000
@@ -130,6 +131,8 @@ KNOWN_OPTIONS = frozenset(
         "snapshot_stream",
         "snapshot_interval_seconds",
         "filter_pushdown",
+        "prefetch_pages",
+        "arrow_batches",
         "infer_schema",
         "sampling_size",
         "sampling_query",
@@ -276,6 +279,8 @@ class CosmosOptions:
     snapshot_stream: bool = False
     snapshot_interval_seconds: float = 0.0
     filter_pushdown: str = "false"  # "false" | "true" | "auto"
+    prefetch_pages: int = 1
+    arrow_batches: str = AUTO  # "auto" | "true" | "false"
     infer_schema: bool = False
     sampling_size: int = DEFAULT_SAMPLING_SIZE
     sampling_query: str | None = None
@@ -408,6 +413,28 @@ def _parse_partitions_per_feed_range(raw: str | None) -> int | str:
     if value < 1 or value > 1024:
         raise CosmosConfigError(f"Option 'partitions_per_feed_range' must be between 1 and 1024, got {value}.")
     return value
+
+
+def _prefetch_pages(opts: dict[str, str]) -> int:
+    value = _int(opts, "prefetch_pages", 1, minimum=0)
+    assert value is not None
+    if value > MAX_PREFETCH_PAGES:
+        raise CosmosConfigError(f"Option 'prefetch_pages' must be at most {MAX_PREFETCH_PAGES}, got {value}.")
+    return value
+
+
+def _parse_tristate(opts: dict[str, str], name: str, default: str) -> str:
+    raw = _get(opts, name)
+    if raw is None:
+        return default
+    lowered = raw.lower()
+    if lowered == AUTO:
+        return AUTO
+    if lowered in ("true", "1", "yes"):
+        return "true"
+    if lowered in ("false", "0", "no"):
+        return "false"
+    raise CosmosConfigError(f"Option '{name}' must be auto, true or false, got {raw!r}.")
 
 
 def _parse_filter_pushdown(raw: str | None) -> str:
@@ -561,6 +588,8 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
         snapshot_stream=snapshot_stream,
         snapshot_interval_seconds=_float(opts, "snapshot_interval_seconds", 0.0, minimum=0.0),
         filter_pushdown=_parse_filter_pushdown(_get(opts, "filter_pushdown")),
+        prefetch_pages=_prefetch_pages(opts),
+        arrow_batches=_parse_tristate(opts, "arrow_batches", AUTO),
         infer_schema=infer,
         sampling_size=_int(opts, "sampling_size", DEFAULT_SAMPLING_SIZE, minimum=1),  # type: ignore[arg-type]
         sampling_query=_get(opts, "sampling_query"),

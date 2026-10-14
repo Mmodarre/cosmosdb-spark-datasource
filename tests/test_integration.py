@@ -44,7 +44,7 @@ from pyspark import cloudpickle
 from pyspark.sql.types import ArrayType, LongType, StringType, StructField, StructType, TimestampType
 
 from tests.conftest import java_major
-from tests.harness import StreamHarness, make_source, run_batch, run_batch_with_filters, validate_rows
+from tests.harness import StreamHarness, as_rows, make_source, run_batch, run_batch_with_filters, validate_rows
 
 ENDPOINT = os.environ.get("COSMOS_ENDPOINT", "")
 KEY = os.environ.get("COSMOS_KEY", "")
@@ -260,9 +260,9 @@ def parallel_batch(opts: dict[str, str], workers: int = 8) -> tuple[list[tuple],
     parts = reader.partitions()
 
     def run(part: Any) -> list[tuple]:
-        rows = list(cloudpickle.loads(shipped).read(part))
-        validate_rows(rows, schema, ds)
-        return rows
+        output = list(cloudpickle.loads(shipped).read(part))
+        validate_rows(output, schema, ds)
+        return as_rows(output, schema)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(run, parts))

@@ -7,7 +7,7 @@ SDK-specific behaviour in one place:
 * ``feed_ranges(force_refresh)``   physical partition EPK ranges, sorted
 * ``query_pages(...)``             query pages for one EPK range, resumable by continuation,
                                    optionally pinned to a session token; each page names the
-                                   physical partitions that served it
+                                   physical partitions that served it; read ahead on a thread
 * ``change_feed_pages(...)``       change-feed pages for one EPK range from an LSN, resumable
 * ``current_lsn(rng, mode)``       current change-feed position without reading data
 * ``resolve_start(rng, mode, s)``  LSN position for Beginning / Now / a timestamp, plus the session
@@ -33,6 +33,7 @@ from cosmosdb_datasource.changefeed import (
 from cosmosdb_datasource.documents import item_lsn
 from cosmosdb_datasource.errors import CosmosChangeFeedError, CosmosDataSourceError, CosmosOffsetError
 from cosmosdb_datasource.options import MODE_LATEST_VERSION
+from cosmosdb_datasource.prefetch import prefetched
 
 logger = logging.getLogger("cosmosdb_datasource")
 
@@ -82,9 +83,10 @@ def _charge(headers: Any) -> float:
 
 
 class SdkBackend:
-    def __init__(self, container: Any, *, priority: str | None = None) -> None:
+    def __init__(self, container: Any, *, priority: str | None = None, prefetch_pages: int = 0) -> None:
         self._container = container
         self._priority = priority
+        self._prefetch_pages = prefetch_pages
         self._properties: dict[str, Any] | None = None
 
     def _kwargs(self) -> dict[str, Any]:
@@ -118,12 +120,24 @@ class SdkBackend:
         continuation: str | None = None,
         session_token: str | None = None,
     ) -> Iterator[QueryPage]:
-        """Yield the query pages of ``rng``.
+        """Yield the query pages of ``rng``, ``prefetch_pages`` ahead of the consumer.
 
         ``session_token`` (Session consistency only; the SDK drops it for other levels) makes the
         service serve every page from a replica that has applied at least that session's writes;
         otherwise it answers 404/1002, which the SDK and :mod:`cosmosdb_datasource.retry` retry.
         """
+        pages = self._query_pages(query, parameters, rng, page_size, continuation, session_token)
+        return prefetched(pages, self._prefetch_pages)
+
+    def _query_pages(
+        self,
+        query: str,
+        parameters: list[dict[str, Any]] | None,
+        rng: tuple[str, str],
+        page_size: int,
+        continuation: str | None,
+        session_token: str | None,
+    ) -> Iterator[QueryPage]:
         charges: list[float] = []
         served: list[str] = []
         times: list[float | None] = []
