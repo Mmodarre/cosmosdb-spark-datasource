@@ -47,7 +47,7 @@ from cosmosdb_datasource.options import PARSE_DROPMALFORMED, PARSE_FAILFAST
 PK_COLUMN = "pk"
 FEED_RANGE_COLUMN = "feed_range"
 SNAPSHOT_TS_COLUMN = "snapshot_ts"
-STREAM_METADATA_COLUMNS = ("id", "_ts", "operation", "lsn", "crts", "ttl_expired")
+STREAM_METADATA_COLUMNS = ("id", "_ts", "operation", "lsn", "lsn_seq", "crts", "ttl_expired")
 
 
 def batch_schema(raw_column: str = "body") -> StructType:
@@ -75,6 +75,7 @@ def change_feed_schema(raw_column: str = "body") -> StructType:
             StructField("operation", StringType(), True),
             StructField("_ts", LongType(), True),
             StructField("lsn", LongType(), True),
+            StructField("lsn_seq", IntegerType(), True),
             StructField("crts", LongType(), True),
             StructField("ttl_expired", BooleanType(), True),
             StructField(raw_column, StringType(), True),
@@ -373,7 +374,19 @@ def _build_non_null_converter(dt: DataType) -> Callable[[Any], Any]:
 class RecordView:
     """Values available to the row builder for one document / change event."""
 
-    __slots__ = ("crts", "doc", "feed_range", "id", "lsn", "operation", "pk", "snapshot_ts", "ts", "ttl_expired")
+    __slots__ = (
+        "crts",
+        "doc",
+        "feed_range",
+        "id",
+        "lsn",
+        "lsn_seq",
+        "operation",
+        "pk",
+        "snapshot_ts",
+        "ts",
+        "ttl_expired",
+    )
 
     def __init__(
         self,
@@ -384,6 +397,7 @@ class RecordView:
         operation: str | None = None,
         ts: int | None = None,
         lsn: int | None = None,
+        lsn_seq: int | None = None,
         crts: int | None = None,
         ttl_expired: bool | None = None,
         feed_range: str | None = None,
@@ -395,6 +409,7 @@ class RecordView:
         self.operation = operation
         self.ts = ts
         self.lsn = lsn
+        self.lsn_seq = lsn_seq
         self.crts = crts
         self.ttl_expired = ttl_expired
         self.feed_range = feed_range
@@ -503,6 +518,7 @@ _STREAM_GETTERS: dict[str, _Getter] = {
     "_ts": lambda v: v.ts,
     "operation": lambda v: v.operation,
     "lsn": lambda v: v.lsn,
+    "lsn_seq": lambda v: v.lsn_seq,
     "crts": lambda v: v.crts,
     "ttl_expired": lambda v: v.ttl_expired,
 }

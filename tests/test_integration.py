@@ -510,7 +510,8 @@ def test_stream_all_versions_and_deletes(make_container) -> None:
     events = [(r[0], r[2], r[4]) for r in rows if r[0] == "avad"]
     assert [op for _, op, _ in sorted(events, key=lambda e: e[2])] == ["create", "replace", "delete"]
     delete = next(r for r in rows if r[0] == "avad" and r[2] == "delete")
-    assert delete[1] == "x" and delete[7] is None and delete[3] == delete[5]
+    col = {n: i for i, n in enumerate(h.schema.fieldNames())}
+    assert delete[col["pk"]] == "x" and delete[col["body"]] is None and delete[col["_ts"]] == delete[col["crts"]]
     # A replay of the logged batch after further writes returns identical rows.
     write(container, 515, 5)
     container.delete_item("d500", partition_key=f"p{500 % 13}")
@@ -549,12 +550,38 @@ def test_partition_key_rendering_matches_across_row_types(make_container) -> Non
     assert sorted(((r[1], r[0]) for r in batch_rows), key=str) == expected
 
 
+@requires("requires_avad")
+def test_versions_of_a_document_sharing_an_lsn_are_ordered(make_container) -> None:
+    """A transactional batch writing a document three times: one LSN and one _ts, ordered by lsn_seq."""
+    name, container = make_container()
+    h = StreamHarness(options(name, change_feed_mode="AllVersionsAndDeletes"))
+    h.start()
+    h.run_batch()
+    for i in range(5):
+        doc_id = f"t{i}"
+        container.execute_item_batch(
+            [
+                ("create", ({"id": doc_id, "pk": "tx", "v": 1},)),
+                ("replace", (doc_id, {"id": doc_id, "pk": "tx", "v": 2})),
+                ("upsert", ({"id": doc_id, "pk": "tx", "v": 3},)),
+            ],
+            partition_key="tx",
+        )
+    time.sleep(2)
+    rows = [dict(zip(h.schema.fieldNames(), r, strict=True)) for r in h.run_until_idle()]
+    for i in range(5):
+        mine = [r for r in rows if r["id"] == f"t{i}"]
+        assert [r["lsn_seq"] for r in mine] == [0, 1, 2] and len({(r["_ts"], r["lsn"]) for r in mine}) == 1
+        last = max(mine, key=lambda r: (r["lsn"], r["lsn_seq"]))
+        assert json.loads(last["body"])["v"] == 3
+
+
 def _merge_latest(rows: list[dict[str, Any]]) -> dict[tuple[Any, Any], int]:
-    """Pick the latest row per (pk, id) by ``struct(operation <> 'snapshot', _ts, lsn)``; a delete means absent."""
+    """Pick the latest row per (pk, id) by ``struct(operation <> 'snapshot', lsn, lsn_seq)``; a delete means absent."""
     best: dict[tuple[Any, Any], dict[str, Any]] = {}
     for r in rows:
         key = (r["pk"], r["id"])
-        rank = (r["operation"] != "snapshot", r["_ts"], r["lsn"])
+        rank = (r["operation"] != "snapshot", r["lsn"], r["lsn_seq"])
         if key not in best or rank > best[key]["rank"]:
             best[key] = {**r, "rank": rank}
     return {k: r["_ts"] for k, r in best.items() if r["operation"] != "delete"}

@@ -176,7 +176,8 @@ def test_replaying_a_batch_is_deterministic(make_store) -> None:
     assert replay == first  # AVAD: identical rows, identical order
     second = h.run_batch()
     # (range, LSN) pairs never repeat across batches (LSNs are per physical partition)
-    assert {(r[8], r[4]) for r in second}.isdisjoint({(r[8], r[4]) for r in first})
+    fr = h.schema.fieldNames().index("feed_range")
+    assert {(r[fr], r[4]) for r in second}.isdisjoint({(r[fr], r[4]) for r in first})
     assert len(second) == 21
 
 
@@ -281,9 +282,10 @@ def test_avad_deletes_and_ttl(make_store) -> None:
     ops = [(e[0], e[1]) for e in sorted(events, key=lambda e: e[2]) if e[0] == "a"]
     assert ops == [("a", "create"), ("a", "replace"), ("a", "delete")]
     deletes = [r for r in rows if r[2] == "delete"]
-    assert all(r[7] is None for r in deletes)  # body null
-    assert {(r[0], r[1], r[6]) for r in deletes} == {("a", "x", False), ("d3", "p3", True)}
-    assert all(r[3] == r[5] for r in deletes)  # _ts falls back to crts for deletes
+    assert all(r[h.schema.fieldNames().index("body")] is None for r in deletes)
+    col = {name: i for i, name in enumerate(h.schema.fieldNames())}
+    assert {(r[0], r[1], r[col["ttl_expired"]]) for r in deletes} == {("a", "x", False), ("d3", "p3", True)}
+    assert all(r[col["_ts"]] == r[col["crts"]] for r in deletes)  # _ts falls back to crts for deletes
 
 
 def test_avad_rejects_beginning() -> None:
@@ -435,7 +437,7 @@ def test_stream_schema_is_validated_through_arrow(make_store) -> None:
     h.start()
     rows = h.run_batch()
     assert {r[1] for r in rows} == {f'["t",{i}]' for i in range(20)}
-    assert all(r[8] for r in rows)  # feed_range populated
+    assert all(r[h.schema.fieldNames().index("feed_range")] for r in rows)
 
 
 def test_file_backed_fake_used_by_local_spark_tests(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

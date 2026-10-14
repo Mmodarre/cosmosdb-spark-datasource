@@ -36,6 +36,12 @@ First public release.
   sub-range query costs about as much RU as a scan of the whole partition (10 sub-ranges: about 10
   times the RU, and no faster). `auto` now reads each physical partition as one task, an explicit
   value above 1 logs a WARNING with the cost, and the trade-off is documented.
+- AllVersionsAndDeletes changes of one document that share an LSN could not be ordered with the
+  documented `sequence_by` (`_ts`, `lsn`): a transactional batch that writes a document several
+  times, and a multi-region-write conflict, which arrives as a delete and a create at one LSN with
+  one `_ts`, so AUTO CDC could keep a stale version or drop a live document. Change-feed rows have
+  a new column `lsn_seq`, the position among the changes of the same document at the same LSN, and
+  the documented ordering is `struct(operation <> 'snapshot', lsn, lsn_seq)`.
 - A partition split while a batch read, an initial snapshot or a snapshot stream was reading a
   partition returned rows twice: azure-cosmos 4.17.1 restarts a split range from its beginning
   (4.14.0 raises 410 and then misroutes the continuation). Every query is now scoped to one

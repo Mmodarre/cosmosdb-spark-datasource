@@ -8,10 +8,10 @@ a decision guide, the ordering rule, the full-refresh rules and costs. Option de
 | # | Mode | Options | `operation` | Deletes | Account requirements | Target pattern |
 |---|---|---|---|---|---|---|
 | 1 | Batch read | `spark.read` (optional `query`) | (no column) | by diffing two reads | none | `create_auto_cdc_from_snapshot_flow` (SCD1 or SCD2) |
-| 2 | LatestVersion | `change_feed_mode=LatestVersion`, `start_from=Beginning\|Now\|<ISO-8601>` | `upsert` | no | none | `create_auto_cdc_flow`, `sequence_by struct(_ts, lsn)` |
+| 2 | LatestVersion | `change_feed_mode=LatestVersion`, `start_from=Beginning\|Now\|<ISO-8601>` | `upsert` | no | none | `create_auto_cdc_flow`, `sequence_by struct(lsn, lsn_seq)` |
 | 3 | AllVersionsAndDeletes (AVAD) | `change_feed_mode=AllVersionsAndDeletes` (`start_from=Now` only) | `create`, `replace`, `delete` | yes | continuous backup with the AVAD change feed; no partition merge | an append-only change log |
-| 4 | AVAD + initial snapshot | mode 3 plus `initial_snapshot=true` | `snapshot`, then `create`, `replace`, `delete` | yes | as mode 3 | `create_auto_cdc_flow`, `sequence_by struct(rank, _ts, lsn)`, `apply_as_deletes` |
-| 5 | LatestVersion + initial snapshot | mode 2 plus `initial_snapshot=true` | `snapshot`, then `upsert` | no | none | `create_auto_cdc_flow`, `sequence_by struct(rank, _ts, lsn)` |
+| 4 | AVAD + initial snapshot | mode 3 plus `initial_snapshot=true` | `snapshot`, then `create`, `replace`, `delete` | yes | as mode 3 | `create_auto_cdc_flow`, `sequence_by struct(rank, lsn, lsn_seq)`, `apply_as_deletes` |
+| 5 | LatestVersion + initial snapshot | mode 2 plus `initial_snapshot=true` | `snapshot`, then `upsert` | no | none | `create_auto_cdc_flow`, `sequence_by struct(rank, lsn, lsn_seq)` |
 | 6 | Snapshot stream | `snapshot_stream=true` (`snapshot_interval_seconds`) | (no column); `snapshot_ts` per snapshot | by diffing consecutive snapshots | none | bronze history, then `create_auto_cdc_from_snapshot_flow` with a source function in a separate pipeline |
 
 What has run where:
@@ -67,7 +67,7 @@ flowgroup only sets the container and the mode options (see [LHP-GUIDE.md](LHP-G
 Schemas:
 
 - Batch reads: `id, pk, _ts, _etag, body`.
-- Change-feed streams: `id, pk, operation, _ts, lsn, crts, ttl_expired, body, feed_range`.
+- Change-feed streams: `id, pk, operation, _ts, lsn, lsn_seq, crts, ttl_expired, body, feed_range`.
 - `body` is the whole document as JSON; keys are `(pk, id)`.
 
 In streams, `operation` is an ordinary string column. Once it lands in bronze, silver uses it for
@@ -177,13 +177,13 @@ dp.create_auto_cdc_flow(
     target="orders_latest",
     source="orders_changes_latest",
     keys=["pk", "id"],
-    sequence_by=F.struct("_ts", "lsn"),
+    sequence_by=F.struct("lsn", "lsn_seq"),
     stored_as_scd_type=1,
-    except_column_list=["operation", "crts", "ttl_expired", "feed_range"],
+    except_column_list=["operation", "lsn_seq", "crts", "ttl_expired", "feed_range"],
 )
 ```
 
-**Target pattern.** Append-only bronze, then SCD1 with `sequence_by struct(_ts, lsn)` and no
+**Target pattern.** Append-only bronze, then SCD1 with `sequence_by struct(lsn, lsn_seq)` and no
 deletes.
 
 **Cost.** The initial load from `Beginning` measured about 58 RU per 1,000 documents of 0.55 KB
@@ -248,7 +248,7 @@ One stream yields the full current state plus every later change, deletes includ
 - With Session consistency, the snapshot queries carry the session tokens observed at P0, so no
   replica behind P0 serves them. With ConsistentPrefix or Eventual consistency,
   `initial_snapshot_delay_seconds` (default 5) is a best-effort wait.
-- Merge rule: per key keep the row with the largest `struct(rank, _ts, lsn)` (see
+- Merge rule: per key keep the row with the largest `struct(rank, lsn, lsn_seq)` (see
   [Ordering](#ordering-sequence_by)); a `delete` means the document is gone. The merged result
   equals the container's state as of the last change read: a document changed after P0 has all
   those changes in the feed, and a document not changed after P0 is in the snapshot. The
@@ -309,9 +309,9 @@ dp.create_auto_cdc_flow(
     target="orders_avad",
     source="orders_changes_avad_ranked",
     keys=["pk", "id"],
-    sequence_by=F.struct("_source_rank", "_ts", "lsn"),
+    sequence_by=F.struct("_source_rank", "lsn", "lsn_seq"),
     apply_as_deletes=F.expr("operation = 'delete'"),
-    except_column_list=["_source_rank", "crts", "ttl_expired", "feed_range"],
+    except_column_list=["_source_rank", "lsn_seq", "crts", "ttl_expired", "feed_range"],
     stored_as_scd_type=1,
 )
 ```
@@ -320,7 +320,7 @@ Without SDP, a `foreachBatch` sink with a `MERGE` that applies the same ordering
 does the same job (not part of the examples).
 
 **Target pattern.** Append-only bronze, then SCD1 with `apply_as_deletes`, keys `(pk, id)` and
-`sequence_by struct(rank, _ts, lsn)`. The target can be rebuilt from bronze at any time, because
+`sequence_by struct(rank, lsn, lsn_seq)`. The target can be rebuilt from bronze at any time, because
 bronze holds the snapshot before any change.
 
 **Cost.** One query read for the snapshot (about 23 RU per 1,000 documents of 0.55 KB), then
@@ -350,7 +350,7 @@ changes = (
 )
 ```
 
-**Target pattern.** As mode 4 with `sequence_by struct(rank, _ts, lsn)`, without
+**Target pattern.** As mode 4 with `sequence_by struct(rank, lsn, lsn_seq)`, without
 `apply_as_deletes`, and with `operation` in `except_column_list`.
 
 **Cost.** One query read, then O(changes).
@@ -506,21 +506,32 @@ start does not move on retry or refresh, so every change after the snapshot read
 Keys are always `(pk, id)`. The ordering used in every example:
 
 ```
-sequence_by = struct(CASE WHEN operation = 'snapshot' THEN 0 ELSE 1 END, _ts, lsn)
+sequence_by = struct(CASE WHEN operation = 'snapshot' THEN 0 ELSE 1 END, lsn, lsn_seq)
 ```
 
-- The rank comes first, so every change row outranks every snapshot row of the same key, whatever
-  the timestamps (equal `_ts` within one second, clocks across regions).
-- Then `_ts`, the server time in seconds. For AVAD deletes the data source sets `_ts` to the
-  delete's `crts`, so it is never null.
-- Then `lsn`, which breaks ties within a second. LSNs increase per document, also across partition
-  splits (tested against the service fake). Ordering by `_ts` first is also meant to protect
-  against LSN discontinuities after partition merges (not verified).
-- Without snapshot rows (modes 2 and 3): `struct(_ts, lsn)`.
+- The rank comes first, so every change row outranks every snapshot row of the same key.
+- Then the order of the change feed: `lsn`, the change's LSN, which increases per document also
+  across partition splits (observed during live splits), and `lsn_seq`, the position among the
+  changes of the same document with the same LSN.
+- Without snapshot rows (modes 2 and 3): `struct(lsn, lsn_seq)`.
 
-`struct(rank, lsn)` would be finer than the 1-second `_ts`, but it assumes a single write region:
-with multi-region writes, conflict resolution follows `crts`, and LSNs from different regions are
-not a global order.
+Several changes of one document share an LSN in two cases, and only the feed order tells them apart:
+
+| Case | Rows of one document at one LSN | `(_ts, lsn)` | `(lsn, lsn_seq)` |
+|---|---|---|---|
+| One transactional batch (or stored procedure) writes a document several times | `create`, `replace`, `replace`, with one `_ts` | ties: picked the final version for 0 of 20 documents | 20 of 20 |
+| Multi-region writes: the same new document created in two regions | `create` (the losing region's), then `delete` and `create` (the winner's) at one LSN, with one `_ts` and `crts` | 2 of 50 | 50 of 50 |
+| Multi-region writes: replace/replace and delete/replace conflicts | one change per LSN | 50 of 50 | 50 of 50 |
+
+Measured against the service. The multi-region case used two write regions with the default
+last-writer-wins policy; the feed was identical through both regions. `_ts` and `crts` are not a
+substitute: in conflicts they tie, and a surviving document can have a `_ts` older than its `crts`.
+The service documents no delivery order for the changes of one transactional batch; they arrived
+in operation order in every test.
+
+Partition merges are not covered: the AllVersionsAndDeletes change feed is not available on
+accounts that use them, and whether LSNs stay comparable across a merge for LatestVersion has not
+been verified.
 
 Deletes: `apply_as_deletes = "operation = 'delete'"` (modes 3 and 4). AUTO CDC keeps delete
 tombstones for `pipelines.cdc.tombstoneGCThresholdInSeconds` (2 days by default); an older row for
