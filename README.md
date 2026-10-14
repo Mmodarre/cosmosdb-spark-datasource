@@ -189,8 +189,8 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `priority` | | `Low` or `High` ([priority-based execution](https://learn.microsoft.com/azure/cosmos-db/priority-based-execution)). `Low` lets OLTP traffic win under contention. |
 | `connection_timeout_seconds` | SDK default | HTTP request timeout |
 | `read_timeout_seconds` | SDK default | Socket read timeout |
-| `throttle_max_retries` | `9` | SDK retries on HTTP 429 |
-| `throttle_max_wait_seconds` | `60` | Cumulative SDK wait on 429 per request |
+| `throttle_max_retries` | `9` | SDK retries on HTTP 429; `0` disables them, so 429s go straight to the retry layer of `max_retries` |
+| `throttle_max_wait_seconds` | `60` | Cumulative SDK wait on 429 per request; `0` disables the SDK's 429 retries as well |
 | `max_retries` | `8` | Retries after the SDK gives up (408, 410, 429, 449, 5xx, 404 with sub-status 1002, network errors). Reads resume from the last completed page. The driver's metadata requests use the same policy. |
 | `retry_max_backoff_seconds` | `60` | Cap of the exponential backoff (jittered; `x-ms-retry-after-ms` is honoured) |
 

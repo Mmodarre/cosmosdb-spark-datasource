@@ -55,6 +55,9 @@ First public release.
 - `start_from` with a timestamp in the future behaved like `Now`: the changes made between the
   start of the stream and that time were delivered. The stream now drops the changes with an
   earlier `_ts`; the bound is stored in the offsets.
+- `throttle_max_retries=0` and `throttle_max_wait_seconds=0` were accepted and ignored: azure-cosmos
+  treats 0 in its keyword arguments as "use the default" (9 retries). The settings are now passed
+  in the client's connection policy, so 0 disables the SDK's 429 retries.
 - `partitions_per_feed_range=auto` split large physical partitions into EPK sub-ranges, and every
   sub-range query costs about as much RU as a scan of the whole partition (10 sub-ranges: about 10
   times the RU, and no faster). `auto` now reads each physical partition as one task, an explicit

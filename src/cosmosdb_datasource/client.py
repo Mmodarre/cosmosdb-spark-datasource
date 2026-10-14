@@ -63,11 +63,28 @@ def _client_key(opts: CosmosOptions) -> tuple[Any, ...]:
     return principal + settings
 
 
+def _connection_policy(opts: CosmosOptions) -> Any:
+    """Return a connection policy with the throttle retry settings of ``opts``.
+
+    The ``retry_throttle_total`` and ``retry_throttle_backoff_max`` keywords cannot express 0:
+    ``cosmos_client._build_connection_policy`` keeps ``value or default`` (azure-cosmos 4.14.0 to
+    4.17.1), so 0 meant 9 retries. A policy passed as ``connection_policy`` keeps its
+    ``RetryOptions``, whose class the public ``ConnectionPolicy.RetryOptions`` setter takes.
+    """
+    from azure.cosmos._retry_options import RetryOptions
+    from azure.cosmos.documents import ConnectionPolicy
+
+    policy = ConnectionPolicy()
+    policy.RetryOptions = RetryOptions(
+        max_retry_attempt_count=opts.throttle_max_retries, max_wait_time_in_seconds=opts.throttle_max_wait_seconds
+    )
+    return policy
+
+
 def _client_kwargs(opts: CosmosOptions) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "user_agent_suffix": f"cosmosdb-spark-datasource/{__version__}",
-        "retry_throttle_total": opts.throttle_max_retries,
-        "retry_throttle_backoff_max": opts.throttle_max_wait_seconds,
+        "connection_policy": _connection_policy(opts),
     }
     if opts.preferred_regions:
         kwargs["preferred_locations"] = list(opts.preferred_regions)
