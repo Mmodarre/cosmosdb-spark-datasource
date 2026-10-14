@@ -36,6 +36,13 @@ First public release.
 
 ### Fixed
 
+- After a container was deleted and re-created, a new stream (new checkpoint) failed on Python
+  workers that had read the old container (`Invalid continuation: [Mismatch collection rid]`)
+  until the workers restarted. A change-feed read now refreshes the client's cached container
+  properties and routing map when the container's `_rid` differs from the one it was planned for.
+- Change-feed reads took the continuation from the client-wide `last_response_headers`, which
+  concurrent reads on the shared client of a worker overwrite. Each pager now reads it from its
+  own last response, and the start probes of a new stream run in parallel.
 - `partitions_per_feed_range=auto` split large physical partitions into EPK sub-ranges, and every
   sub-range query costs about as much RU as a scan of the whole partition (10 sub-ranges: about 10
   times the RU, and no faster). `auto` now reads each physical partition as one task, an explicit

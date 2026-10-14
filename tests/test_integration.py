@@ -587,6 +587,62 @@ def test_versions_of_a_document_sharing_an_lsn_are_ordered(make_container) -> No
         assert json.loads(last["body"])["v"] == 3
 
 
+def _reused_executor(inbox: Any, outbox: Any) -> None:
+    """A long-lived Python worker: reads the partitions it is sent, keeping its client cache between them."""
+    while (job := inbox.get()) is not None:
+        reader_blob, partition_blob = job
+        try:
+            rows = cloudpickle.loads(reader_blob).read(pickle.loads(partition_blob))
+            outbox.put(("ok", sorted(r[0] for r in rows)))
+        except Exception as exc:
+            outbox.put(("error", f"{type(exc).__name__}: {exc}"[:500]))
+
+
+def test_new_stream_after_the_container_is_recreated_in_a_reused_worker(make_container, sdk_db) -> None:
+    """A worker that read the old container instance reads a new stream on the re-created container."""
+    import multiprocessing
+
+    from azure.cosmos import PartitionKey
+
+    name, container = make_container()
+    write(container, 0, 3)
+    ctx = multiprocessing.get_context("spawn")
+    inbox, outbox = ctx.Queue(), ctx.Queue()
+    worker = ctx.Process(target=_reused_executor, args=(inbox, outbox), daemon=True)
+    worker.start()
+
+    def read_in_worker(h: StreamHarness) -> list[Any]:
+        start = h.start()
+        end = h.latest()
+        results = []
+        for part in h.planner.partitions(json.loads(start), json.loads(end)):
+            inbox.put((h._executor_blob, pickle.dumps(part)))
+            status, value = outbox.get(timeout=300)
+            assert status == "ok", value
+            results.extend(value)
+        return sorted(results)
+
+    try:
+        assert read_in_worker(StreamHarness(options(name, change_feed_mode="LatestVersion"))) == ["d0", "d1", "d2"]
+        sdk_db.delete_container(name)
+        recreated = None
+        for attempt in range(6):
+            try:
+                recreated = sdk_db.create_container_if_not_exists(name, partition_key=PartitionKey(path="/pk"))
+                break
+            except Exception:
+                if attempt == 5:
+                    raise
+                time.sleep(5)
+        for i in range(3):
+            _RetryingContainer(recreated).upsert_item(document(100 + i))
+        fresh = StreamHarness(options(name, change_feed_mode="LatestVersion"))  # a new checkpoint
+        assert read_in_worker(fresh) == ["d100", "d101", "d102"]
+    finally:
+        inbox.put(None)
+        worker.join(timeout=60)
+
+
 def _merge_latest(rows: list[dict[str, Any]]) -> dict[tuple[Any, Any], int]:
     """Pick the latest row per (pk, id) by ``struct(operation <> 'snapshot', lsn, lsn_seq)``; a delete means absent."""
     best: dict[tuple[Any, Any], dict[str, Any]] = {}

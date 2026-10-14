@@ -225,9 +225,7 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
                     lambda: backend.resolve_start(rng, mode, start),
                 )
 
-            # Sequential on purpose: the split check in resolve_start reads the SDK's per-client
-            # last_response_headers, which concurrent requests would overwrite. Runs once per query.
-            resolved = [resolve(rng) for rng in ranges]
+            resolved = _parallel_map(resolve, list(ranges))
             self._resolved_at = time.monotonic()
             snapshot = None
             if opts.initial_snapshot:
