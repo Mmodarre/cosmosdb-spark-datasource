@@ -34,9 +34,18 @@ module-name = "cosmosdb_datasource"
 [dependency-groups]
 dev = [
     "azure-identity>=1.19",
+    "mypy>=2.4",
     "pyarrow>=25.0.1",
     "pyspark>=4.0,<4.3",
     "pytest>=9.1.1",
+    "pytest-cov>=7.1",
+    { include-group = "coverage" },
+    { include-group = "lint" },
+]
+coverage = [
+    "coverage>=7.10.6",
+]
+lint = [
     "ruff>=0.16.10",
 ]
 
@@ -54,6 +63,25 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "BLE001", "B011"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src"]
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+strict_equality = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[tool.coverage.run]
+source = ["cosmosdb_datasource"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 85
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

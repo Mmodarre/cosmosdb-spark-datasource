@@ -11,7 +11,7 @@ import re
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from pyspark.sql.datasource import DataSourceReader, InputPartition
 from pyspark.sql.types import StructType
@@ -56,7 +56,7 @@ def split_feed_ranges(
     ranges: Sequence[tuple[str, str]], splits: int, pk: PartitionKeyInfo
 ) -> list[tuple[tuple[str, str], tuple[str, str]]]:
     """``(feed range, sub-range)`` pairs: every feed range EPK-split into ``splits`` sub-ranges."""
-    out = []
+    out: list[tuple[tuple[str, str], tuple[str, str]]] = []
     for lo, hi in ranges:
         out.extend(((lo, hi), sub) for sub in epk.split_range(lo, hi, splits, kind=pk.kind, version=pk.version))
     return out
@@ -137,9 +137,10 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
         logger.info("cosmosdb batch read planned: %d feed range(s), %d partition(s)", len(ranges), len(parts))
         return parts
 
-    def read(self, partition: CosmosQueryPartition | None) -> Iterator[tuple[Any, ...]]:
+    def read(self, partition: InputPartition | None) -> Iterator[tuple[Any, ...]]:
         if partition is None:  # Spark substitutes [None] for an empty partition list
             return
+        partition = cast(CosmosQueryPartition, partition)
         started = time.monotonic()
         opts = self._opts
         builder = self._row_builder()
@@ -162,7 +163,7 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
                 view = RecordView(doc, id=doc.get("id"), pk=pk.extract(doc), feed_range=partition.feed_range)
             else:  # SELECT VALUE <scalar>
                 view = RecordView(None, feed_range=partition.feed_range)
-                view.doc = doc  # type: ignore[assignment]
+                view.doc = doc
             row = builder.build(view)
             if row is not None:
                 rows += 1

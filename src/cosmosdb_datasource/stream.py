@@ -31,7 +31,7 @@ import logging
 import time
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from pyspark.sql.datasource import DataSourceStreamReader, InputPartition
 from pyspark.sql.types import StructType
@@ -211,15 +211,16 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
             mode = opts.change_feed_mode
             start: Any = opts.start_from_datetime or opts.start_from
             ranges = self._feed_ranges(backend)
+
+            def resolve(rng: tuple[str, str]) -> tuple[int, str | None]:
+                return self._driver_call(
+                    f"resolving the start position of range {epk.range_key(*rng)}",
+                    lambda: backend.resolve_start(rng, mode, start),
+                )
+
             # Sequential on purpose: the split check in resolve_start reads the SDK's per-client
             # last_response_headers, which concurrent requests would overwrite. Runs once per query.
-            resolved = [
-                self._driver_call(
-                    f"resolving the start position of range {epk.range_key(*rng)}",
-                    lambda rng=rng: backend.resolve_start(rng, mode, start),
-                )
-                for rng in ranges
-            ]
+            resolved = [resolve(rng) for rng in ranges]
             self._resolved_at = time.monotonic()
             snapshot = None
             if opts.initial_snapshot:
@@ -252,6 +253,7 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
     def latestOffset(self, start: dict | None = None, limit: Any = None) -> dict:
         if limit is not None:
             _compat.warn_if_available_now_unsupported(_AvailableNowBase, "latestOffset(start, limit)")
+        base: Offset | None
         if start is not None:
             base = Offset.from_dict(start)
         else:
@@ -400,12 +402,13 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
             retry.sleep(remaining)
 
     # -- executor -------------------------------------------------------------------------------
-    def read(self, partition: CosmosChangeFeedPartition | CosmosSnapshotPartition | None) -> Iterator[tuple[Any, ...]]:
+    def read(self, partition: InputPartition | None) -> Iterator[tuple[Any, ...]]:
         if partition is None:
             return
         if isinstance(partition, CosmosSnapshotPartition):
             yield from self._read_snapshot(partition)
             return
+        partition = cast(CosmosChangeFeedPartition, partition)
         started = time.monotonic()
         opts = self._opts
         mode = opts.change_feed_mode
