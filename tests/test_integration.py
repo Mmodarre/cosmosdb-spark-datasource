@@ -123,6 +123,53 @@ def sdk_db() -> Iterator[Any]:
     client.__exit__(None, None, None)  # CosmosClient.close() does not exist in azure-cosmos 4.14
 
 
+_TRANSIENT_STATUS = frozenset({408, 429, 449, 500, 503})
+
+
+def _retry_write(write: Callable[[], Any], *, delete: bool = False) -> Any:
+    """Run one of the tests' own writes, retried on transient errors.
+
+    The emulators time out writes under load (HTTP 408, seen on the legacy emulator right after a
+    container was created), and the SDK does not retry timed-out writes. Upserts are idempotent; a
+    retried delete whose first attempt went through returns 404, which counts as done.
+    """
+    from azure.core.exceptions import ServiceRequestError, ServiceResponseError
+    from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
+
+    for attempt in range(6):
+        try:
+            return write()
+        except CosmosResourceNotFoundError:
+            if delete and attempt > 0:
+                return None
+            raise
+        except (CosmosHttpResponseError, ServiceRequestError, ServiceResponseError) as exc:
+            status = getattr(exc, "status_code", None)
+            if attempt == 5 or (isinstance(exc, CosmosHttpResponseError) and status not in _TRANSIENT_STATUS):
+                raise
+            time.sleep(2 * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
+class _RetryingContainer:
+    """Container proxy whose writes are retried (``_retry_write``); everything else is delegated."""
+
+    def __init__(self, container: Any) -> None:
+        self._container = container
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._container, name)
+
+    def upsert_item(self, *args: Any, **kwargs: Any) -> Any:
+        return _retry_write(lambda: self._container.upsert_item(*args, **kwargs))
+
+    def execute_item_batch(self, *args: Any, **kwargs: Any) -> Any:
+        return _retry_write(lambda: self._container.execute_item_batch(*args, **kwargs))
+
+    def delete_item(self, *args: Any, **kwargs: Any) -> Any:
+        return _retry_write(lambda: self._container.delete_item(*args, **kwargs), delete=True)
+
+
 @contextlib.contextmanager
 def temporary_container(db: Any, *, version: int = 2, throughput: int | None = None) -> Iterator[tuple[str, Any]]:
     from azure.cosmos import PartitionKey
@@ -144,7 +191,7 @@ def temporary_container(db: Any, *, version: int = 2, throughput: int | None = N
                 if attempt == 3:
                     raise
                 time.sleep(5 * (attempt + 1))
-        yield name, container
+        yield name, _RetryingContainer(container)
     finally:  # also after a failed creation that the service completed
         with contextlib.suppress(CosmosResourceNotFoundError):
             db.delete_container(name)
