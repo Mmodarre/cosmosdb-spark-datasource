@@ -1,0 +1,40 @@
+# Batch snapshot to SCD2 in one pipeline, without bronze history (MODES.md, mode 1).
+#
+#   cosmosdb batch read of the whole container (temporary view)
+#     -> silver customers_scd2 (create_auto_cdc_from_snapshot_flow, SCD2)
+#
+# Every update reads the whole container, and AUTO CDC FROM SNAPSHOT diffs it with the previous
+# snapshot by (pk, id): a new key opens a current row, changed columns close it and open a new one,
+# a missing key closes it (a hard delete). The view must depend on the documents only (no ingest
+# timestamps), otherwise every update creates a new version of every row. A read that returns too
+# few documents closes every missing row.
+pipeline: lhp_customers_scd2
+flowgroup: customers_scd2
+presets:
+  - cosmos_connection
+
+actions:
+  - name: load_customers_snapshot
+    type: load
+    readMode: batch
+    source:
+      type: custom_datasource
+      options:
+        container: "${customers_container}"
+        partitions_per_feed_range: "${partitions_per_feed_range}"
+    target: v_customers_snapshot
+    description: "Full batch read of the customers container (one per pipeline update)"
+
+  - name: write_customers_scd2
+    type: write
+    write_target:
+      type: streaming_table
+      mode: snapshot_cdc
+      catalog: "${catalog}"
+      schema: "${silver_schema}"
+      table: customers_scd2
+      comment: "customers as SCD2 from a full snapshot per pipeline update (deletes close the row)"
+      snapshot_cdc_config:
+        source: v_customers_snapshot
+        keys: ["pk", "id"]
+        stored_as_scd_type: 2

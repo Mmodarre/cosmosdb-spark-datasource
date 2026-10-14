@@ -1,0 +1,31 @@
+# Settings of the generated pipeline resources (resources/lhp/*.yml). Pass this file to every
+# validate and generate: lhp generate --env dev --pipeline-config config/pipeline_config.yaml
+# Lists replace (they are not appended to) the project_defaults lists.
+project_defaults:
+  serverless: true
+  channel: CURRENT
+  continuous: false
+  catalog: "${catalog}"
+  schema: "${bronze_schema}"
+  environment:
+    dependencies:
+      # The reader classes run in Python worker processes, so the data source must be an installed
+      # package. Write ranges with ~=: SDP failed to install a requirement written with >= and <.
+      - "${datasource_package}"
+      - "azure-identity~=1.19"  # for auth_type service_principal and default
+
+---
+pipeline: lhp_orders_avad
+tags:
+  pattern: change_feed_avad_initial_snapshot
+
+---
+pipeline: lhp_orders_latest
+tags:
+  pattern: change_feed_latest_version
+
+---
+pipeline: lhp_customers_scd2
+schema: "${silver_schema}"
+tags:
+  pattern: batch_snapshot_scd2

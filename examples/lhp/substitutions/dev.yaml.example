@@ -1,0 +1,25 @@
+# Substitutions of the `dev` environment (bundle target `dev`):
+#   cp substitutions/dev.yaml.example substitutions/dev.yaml     # gitignored
+# then replace the <...> placeholders. The values are resolved into generated/ and resources/lhp/
+# by `lhp generate`; both are gitignored too.
+dev:
+  env: dev
+  catalog: <catalog>
+  bronze_schema: cosmosdb_lhp_bronze
+  silver_schema: cosmosdb_lhp_silver
+  ops_schema: cosmosdb_lhp_ops
+  # A version from PyPI, or the path of a wheel in a Unity Catalog volume.
+  datasource_package: cosmosdb-spark-datasource~=0.2.0
+
+  cosmos_database: <database>
+  customers_container: customers
+  orders_container: orders
+  # EPK sub-splits per physical partition: "auto" sizes batch reads (about 1 GiB per task) and
+  # means 1 for change-feed reads.
+  partitions_per_feed_range: "1"
+
+secrets:
+  # Alias -> secret scope. The preset uses ${secret:cosmos/endpoint} and ${secret:cosmos/account-key}.
+  default_scope: <scope>
+  scopes:
+    cosmos: <scope>

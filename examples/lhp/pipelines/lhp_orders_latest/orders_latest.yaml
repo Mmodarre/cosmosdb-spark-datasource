@@ -1,0 +1,65 @@
+# LatestVersion change feed from the beginning to SCD1 (MODES.md, mode 2).
+#
+#   cosmosdb readStream (LatestVersion, start_from=Beginning)
+#     -> bronze orders_changes_latest (append-only)
+#     -> silver orders_latest (SCD1)
+#
+# The first micro-batch from Beginning holds the latest version of every live document. Hard deletes
+# are not in this feed: deleted documents stay in silver. On a large container, add
+# `max_items_per_trigger: "<LSN budget>"` to the options so the first run commits in several
+# micro-batches.
+pipeline: lhp_orders_latest
+flowgroup: orders_latest
+presets:
+  - cosmos_connection
+
+actions:
+  - name: load_orders_latest_stream
+    type: load
+    readMode: stream
+    operational_metadata: ["_ingested_at"]
+    source:
+      type: custom_datasource
+      options:
+        container: "${orders_container}"
+        change_feed_mode: LatestVersion
+        start_from: Beginning
+        partitions_per_feed_range: "${partitions_per_feed_range}"
+    target: v_orders_latest_stream
+    description: "LatestVersion change feed of the orders container (no deletes)"
+
+  - name: write_orders_changes_latest
+    type: write
+    source: v_orders_latest_stream
+    write_target:
+      type: streaming_table
+      catalog: "${catalog}"
+      schema: "${bronze_schema}"
+      table: orders_changes_latest
+      comment: "Raw LatestVersion change feed (operation='upsert'; deletes not captured)"
+
+  - name: load_orders_changes_latest
+    type: load
+    readMode: stream
+    source:
+      type: delta
+      catalog: "${catalog}"
+      schema: "${bronze_schema}"
+      table: orders_changes_latest
+    target: v_orders_changes_latest
+
+  - name: write_orders_latest
+    type: write
+    source: v_orders_changes_latest
+    write_target:
+      type: streaming_table
+      mode: cdc
+      catalog: "${catalog}"
+      schema: "${silver_schema}"
+      table: orders_latest
+      comment: "Latest version of each orders document (SCD1; deletes not captured)"
+      cdc_config:
+        keys: ["pk", "id"]
+        sequence_by: ["_ts", "lsn"]
+        scd_type: 1
+        except_column_list: ["operation", "crts", "ttl_expired", "feed_range", "_ingested_at"]

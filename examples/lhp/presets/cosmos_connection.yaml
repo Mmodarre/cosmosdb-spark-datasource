@@ -1,0 +1,24 @@
+# Connection and credentials for every `custom_datasource` load of the cosmosdb data source.
+# Flowgroups opt in with `presets: [cosmos_connection]` and add only the container and the read
+# options. Secrets come from the scope behind the `cosmos` alias (substitutions: secrets.scopes).
+#
+# Presets are resolved before substitutions, so the auth type cannot change per environment. For an
+# Entra ID service principal, replace the last two options with:
+#   auth_type: service_principal
+#   tenant_id: "${cosmos_tenant_id}"          # add cosmos_tenant_id to substitutions/<env>.yaml
+#   client_id: "${secret:cosmos/client-id}"
+#   client_secret: "${secret:cosmos/client-secret}"
+name: cosmos_connection
+version: "1.0"
+description: "cosmosdb data source: entry module, endpoint, database and credentials"
+
+defaults:
+  load_actions:
+    custom_datasource:
+      module_path: py_functions/cosmos_source.py
+      custom_datasource_class: CosmosDB
+      options:
+        endpoint: "${secret:cosmos/endpoint}"
+        database: "${cosmos_database}"
+        auth_type: key
+        account_key: "${secret:cosmos/account-key}"

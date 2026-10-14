@@ -1,0 +1,65 @@
+resources:
+  jobs:
+    # Compares a container with a target table: missing, extra and stale keys. Run it while nothing
+    # writes to the container and after the pipeline has caught up, e.g.
+    #   databricks bundle run cosmos_reconcile \
+    #     --params container=orders,table=<catalog>.cosmosdb_silver.orders_avad,kind=scd1
+    # kind: scd1 (all rows current), scd2 (current rows have __END_AT IS NULL), scd1_latest
+    # (LatestVersion target: extra rows are uncaptured deletes and only reported).
+    cosmos_reconcile:
+      name: cosmos_reconcile
+      max_concurrent_runs: 1
+      parameters:
+        - name: container
+          default: ${var.orders_container}
+        - name: table
+          default: ${var.catalog}.${var.silver_schema}.orders_avad
+        - name: kind
+          default: scd1
+      tasks:
+        - task_key: reconcile
+          environment_key: datasource
+          # A failed reconcile is a result, not a transient error.
+          max_retries: 0
+          spark_python_task:
+            python_file: ../src/ops/reconcile.py
+            parameters:
+              - --container
+              - "{{job.parameters.container}}"
+              - --table
+              - "{{job.parameters.table}}"
+              - --kind
+              - "{{job.parameters.kind}}"
+              - --job_run_id
+              - "{{job.run_id}}"
+              - --results_table
+              - ${var.catalog}.${var.ops_schema}.reconcile_results
+              - --conf
+              - cosmos.database=${var.cosmos_database}
+              - --conf
+              - cosmos.secret_scope=${var.secret_scope}
+              - --conf
+              - cosmos.secret_key.endpoint=${var.secret_key_endpoint}
+              - --conf
+              - cosmos.auth_type=${var.auth_type}
+              - --conf
+              - cosmos.secret_key.account_key=${var.secret_key_account_key}
+              - --conf
+              - cosmos.tenant_id=${var.tenant_id}
+              - --conf
+              - cosmos.secret_key.client_id=${var.secret_key_client_id}
+              - --conf
+              - cosmos.secret_key.client_secret=${var.secret_key_client_secret}
+              - --conf
+              - cosmos.service_credential=${var.service_credential}
+              - --conf
+              - cosmos.partitions_per_feed_range=${var.partitions_per_feed_range}
+              - --conf
+              - cosmos.priority=${var.priority}
+      environments:
+        - environment_key: datasource
+          spec:
+            environment_version: "4"
+            dependencies:
+              - ${var.datasource_package}
+              - azure-identity~=1.19

@@ -1,0 +1,6 @@
+extend = "../../pyproject.toml"
+# Provided by the Lakeflow Spark Declarative Pipelines runtime in pipeline source files.
+builtins = ["spark", "dbutils"]
+
+[lint.isort]
+known-first-party = ["common"]

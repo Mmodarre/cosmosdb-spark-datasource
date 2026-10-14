@@ -1,0 +1,25 @@
+# Lakehouse Plumber project: Azure Cosmos DB for NoSQL to Unity Catalog with the cosmosdb Python
+# data source. See README.md and ../../docs/LHP-GUIDE.md.
+name: cosmosdb_lhp_example
+version: "1.0"
+description: "Cosmos DB ingest pipelines (batch snapshot and change feed) generated with Lakehouse Plumber"
+
+# The generated code and the workarounds in ../../docs/LHP-GUIDE.md were checked with this version.
+required_lhp_version: "==0.9.2"
+
+# Added only where an action opts in with `operational_metadata: [...]`: the append-only bronze
+# loads. Never on a snapshot that feeds snapshot_cdc, where a value that changes on every run would
+# create a new SCD2 version of every row on every run.
+operational_metadata:
+  columns:
+    _ingested_at:
+      expression: "F.current_timestamp()"
+      description: "When the pipeline update ingested the row"
+      applies_to: ["view"]
+
+# One event-log table per pipeline: <catalog>.<ops_schema>.<pipeline>_event_log.
+event_log:
+  enabled: true
+  catalog: "${catalog}"
+  schema: "${ops_schema}"
+  name_suffix: "_event_log"

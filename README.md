@@ -348,6 +348,8 @@ Entra ID works.
 
 ## Change feed
 
+[docs/MODES.md](docs/MODES.md) describes each mode in detail.
+
 ### Modes
 
 | | `LatestVersion` | `AllVersionsAndDeletes` |
@@ -486,6 +488,14 @@ The correctness argument is in [docs/DESIGN.md](docs/DESIGN.md#initial-snapshot)
 
 ## Documentation
 
+- [docs/MODES.md](docs/MODES.md): every read mode with examples, guarantees and the matching
+  target-table pattern; choosing between a snapshot and the change feed; ordering, full-refresh
+  rules and costs.
+- [docs/LHP-GUIDE.md](docs/LHP-GUIDE.md): using the data source with Lakehouse Plumber.
+- [examples/databricks-bundle/](examples/databricks-bundle/): a Declarative Automation Bundle with
+  snapshot SCD2, LatestVersion SCD1 and AllVersionsAndDeletes + `initial_snapshot` SCD1 pipelines,
+  and a reconcile job.
+- [examples/lhp/](examples/lhp/): the same patterns as a Lakehouse Plumber project.
 - [docs/DESIGN.md](docs/DESIGN.md): SDK and PySpark findings, offsets, the determinism and
   initial-snapshot arguments, and the test strategy.
 - [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md), [RELEASING.md](RELEASING.md),

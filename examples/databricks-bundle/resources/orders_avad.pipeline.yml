@@ -1,0 +1,38 @@
+resources:
+  pipelines:
+    orders_avad:
+      name: cosmos_orders_avad
+      catalog: ${var.catalog}
+      schema: ${var.bronze_schema}
+      serverless: true
+      continuous: false
+      channel: CURRENT
+      root_path: ../src
+      libraries:
+        - glob:
+            include: ../src/pipelines/orders_avad/**
+      environment:
+        dependencies:
+          - ${var.datasource_package}
+          - azure-identity~=1.19  # for auth_type service_principal and default
+      configuration:
+        cosmos.catalog: ${var.catalog}
+        cosmos.bronze_schema: ${var.bronze_schema}
+        cosmos.silver_schema: ${var.silver_schema}
+        cosmos.database: ${var.cosmos_database}
+        cosmos.container: ${var.orders_container}
+        cosmos.secret_scope: ${var.secret_scope}
+        cosmos.secret_key.endpoint: ${var.secret_key_endpoint}
+        cosmos.auth_type: ${var.auth_type}
+        cosmos.secret_key.account_key: ${var.secret_key_account_key}
+        cosmos.tenant_id: ${var.tenant_id}
+        cosmos.secret_key.client_id: ${var.secret_key_client_id}
+        cosmos.secret_key.client_secret: ${var.secret_key_client_secret}
+        cosmos.service_credential: ${var.service_credential}
+        cosmos.partitions_per_feed_range: ${var.partitions_per_feed_range}
+        cosmos.priority: ${var.priority}
+        cosmos.max_items_per_trigger: ${var.max_items_per_trigger}
+      event_log:
+        catalog: ${var.catalog}
+        schema: ${var.ops_schema}
+        name: cosmos_orders_avad_event_log
