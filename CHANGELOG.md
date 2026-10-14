@@ -10,6 +10,10 @@ First public release.
 
 ### Added
 
+- Service principals with a certificate (`client_certificate`, `client_certificate_password`),
+  `max_integrated_cache_staleness_ms` for queries through a dedicated gateway, and sampled
+  slow-request logging (`slow_request_ms`, `slow_request_log_per_minute`) with activity ids,
+  partitions, request charge, service-side duration and throttling retries.
 - Change feed as a batch read: `spark.read` with change-feed options reads the changes between two
   positions (`start_from` or a checkpoint, to now or `end_at`), capped by `max_items_per_trigger`.
   With `batch_checkpoint_location`, a read replays its range until `commit_batch_checkpoint()`

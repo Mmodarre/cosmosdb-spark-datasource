@@ -8,6 +8,8 @@ not perform network calls.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
@@ -90,7 +92,7 @@ SNAPSHOT_STREAM_EXCLUSIVE_OPTIONS = (
     "change_feed_end_wait_seconds",
 )
 
-SECRET_OPTIONS = ("account_key", "client_secret", "access_token")
+SECRET_OPTIONS = ("account_key", "client_secret", "access_token", "client_certificate", "client_certificate_password")
 
 # Internal, undocumented test hook: "<module>:<callable>" returning a backend. Only honoured when
 # the environment variable below is set, so it cannot be triggered by accident in production.
@@ -107,6 +109,8 @@ KNOWN_OPTIONS = frozenset(
         "tenant_id",
         "client_id",
         "client_secret",
+        "client_certificate",
+        "client_certificate_password",
         "access_token",
         "access_token_expires_on",
         "service_credential",
@@ -144,6 +148,9 @@ KNOWN_OPTIONS = frozenset(
         "target_ru_per_second",
         "end_at",
         "batch_checkpoint_location",
+        "max_integrated_cache_staleness_ms",
+        "slow_request_ms",
+        "slow_request_log_per_minute",
         "infer_schema",
         "sampling_size",
         "sampling_query",
@@ -251,10 +258,19 @@ class AuthOptions:
     # Secrets: excluded from repr/eq so they never end up in logs or error messages.
     account_key: str | None = field(default=None, repr=False, compare=False)
     client_secret: str | None = field(default=None, repr=False, compare=False)
+    client_certificate: str | None = field(default=None, repr=False, compare=False)  # base64 PEM or PKCS#12
+    client_certificate_password: str | None = field(default=None, repr=False, compare=False)
     access_token: str | None = field(default=None, repr=False, compare=False)
 
     def secrets(self) -> tuple[str, ...]:
-        return tuple(s for s in (self.account_key, self.client_secret, self.access_token) if s)
+        values = (
+            self.account_key,
+            self.client_secret,
+            self.access_token,
+            self.client_certificate,
+            self.client_certificate_password,
+        )
+        return tuple(s for s in values if s)
 
 
 @dataclass(frozen=True)
@@ -304,6 +320,9 @@ class CosmosOptions:
     stream_options_present: tuple[str, ...] = ()
     batch_change_feed_options_present: tuple[str, ...] = ()
     end_at: str | None = None  # ISO-8601, UTC
+    max_integrated_cache_staleness_ms: int | None = None
+    slow_request_ms: float | None = None
+    slow_request_log_per_minute: int = 10
     batch_checkpoint_location: str | None = None
     query_explicit: bool = False
     test_backend: str | None = None
@@ -336,7 +355,7 @@ def _infer_auth_type(opts: dict[str, str]) -> str:
     candidates = []
     if _get(opts, "account_key"):
         candidates.append(AUTH_KEY)
-    if _get(opts, "client_secret"):
+    if _get(opts, "client_secret") or _get(opts, "client_certificate"):
         candidates.append(AUTH_SERVICE_PRINCIPAL)
     if _get(opts, "access_token"):
         candidates.append(AUTH_ACCESS_TOKEN)
@@ -370,10 +389,12 @@ def _parse_auth(opts: dict[str, str]) -> AuthOptions:
         account_key=_get(opts, "account_key"),
         client_secret=_get(opts, "client_secret"),
         access_token=_get(opts, "access_token"),
+        client_certificate=_get(opts, "client_certificate"),
+        client_certificate_password=_get(opts, "client_certificate_password"),
     )
     required = {
         AUTH_KEY: ("account_key",),
-        AUTH_SERVICE_PRINCIPAL: ("tenant_id", "client_id", "client_secret"),
+        AUTH_SERVICE_PRINCIPAL: ("tenant_id", "client_id"),
         AUTH_ACCESS_TOKEN: ("access_token",),
         AUTH_SERVICE_CREDENTIAL: ("service_credential",),
         AUTH_DEFAULT: (),
@@ -381,6 +402,18 @@ def _parse_auth(opts: dict[str, str]) -> AuthOptions:
     missing = [name for name in required if not _get(opts, name)]
     if missing:
         raise CosmosConfigError(f"auth_type={auth_type} requires option(s): {', '.join(missing)}.")
+    if auth_type == AUTH_SERVICE_PRINCIPAL and bool(auth.client_secret) == bool(auth.client_certificate):
+        raise CosmosConfigError(
+            "auth_type=service_principal requires exactly one of the options client_secret and client_certificate."
+        )
+    if auth.client_certificate:
+        try:
+            base64.b64decode(auth.client_certificate, validate=True)
+        except (ValueError, binascii.Error):
+            raise CosmosConfigError(
+                "Option 'client_certificate' must be the base64 encoding of a PEM or PKCS#12 certificate with its "
+                "private key."
+            ) from None
     return auth
 
 
@@ -706,6 +739,9 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
         batch_change_feed_options_present=tuple(n for n in CHANGE_FEED_BATCH_OPTIONS if _get(opts, n) is not None),
         end_at=_parse_end_at(_get(opts, "end_at"), cf_mode),
         batch_checkpoint_location=_get(opts, "batch_checkpoint_location"),
+        max_integrated_cache_staleness_ms=_int(opts, "max_integrated_cache_staleness_ms", None, minimum=0),
+        slow_request_ms=_float(opts, "slow_request_ms", 0.0, minimum=0.0) or None,
+        slow_request_log_per_minute=_int(opts, "slow_request_log_per_minute", 10, minimum=1),  # type: ignore[arg-type]
         query_explicit=query is not None,
         test_backend=test_backend,
     )

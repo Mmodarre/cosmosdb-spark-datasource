@@ -496,7 +496,7 @@ splits a backlog on PySpark 4.0 and 4.1, where `Trigger.AvailableNow` runs one c
 | `auth_type` | Driver | Executor | Fallback before expiry |
 |---|---|---|---|
 | `key` | account key | account key | n/a |
-| `service_principal` | `ClientSecretCredential.get_token(scope)` | shipped token | rebuild `ClientSecretCredential` |
+| `service_principal` | `ClientSecretCredential` (or `CertificateCredential` with `client_certificate`) `.get_token(scope)` | shipped token | rebuild the same credential |
 | `default` | `DefaultAzureCredential` | shipped token | rebuild `DefaultAzureCredential` |
 | `service_credential` | `databricks.service_credentials.getServiceCredentialsProvider(name)`, then `pyspark.dbutils`, then `databricks.sdk.runtime.dbutils` | shipped token | same lookup on the worker |
 | `access_token` | caller's token (expiry from option or JWT `exp`) | shipped token | none: clear error when expired |
@@ -518,6 +518,8 @@ Notes:
 - **Priority-based execution** (`priority=Low`), so bulk reads do not starve OLTP traffic when the account feature is on.
 - **Throughput buckets** (`throughput_bucket`): a client keyword of azure-cosmos (4.14.0 and later) that adds `x-ms-cosmos-throughput-bucket` to every request; part of the client cache key.
 - **RU budget** (`target_ru_per_second`, `throughput.py`). Planning attaches `RuBudget(read_id, target / partitions)` to every input partition (`CosmosReaderBase._with_budget`), and a task's backend is wrapped (`ThrottledBackend`) so that every page iterator and `read_items` call charges a `SharedBucket`: one JSON file per read under the temp directory, updated under `fcntl.flock` of one lock file shared by all reads, holding the tokens and the members with their shares, and removed when the read's last task leaves. The refill rate is the sum of the current members' shares, the capacity one second of it, and a charge that leaves the bucket in debt makes the task sleep `debt / rate`; debt is repaid at the rate whoever waits, so the bucket is a FIFO with service rate equal to the members' shares. A member leaves when its page iterator ends, and one not seen for 30 s after its last sleep ended (a crashed worker) is dropped. A first version measured its staleness from the last charge, which dropped members during long sleeps and ran a 20 RU/s read at 3.9 RU/s; the test `test_a_long_sleep_keeps_the_share` covers it. Since every running task contributes its share, a read stays at or below its budget wherever its tasks run.
+- **Slow requests** (`diagnostics.py`, `slow_request_ms`): the fetch of each query or change-feed page and each `read_items` call is timed where it happens (on the read-ahead thread for queries) from the response headers the hook collects; a slow one is logged with `x-ms-activity-id`, `x-ms-documentdb-partitionkeyrangeid`, `x-ms-request-duration-ms` and the SDK's `x-ms-throttle-retry-count` / `-wait-time-ms`, rate-limited per worker process and minute. Against an account from a client far from the region the log showed 25 to 37 ms of service time in 1.2 to 2.5 s page fetches.
+- **Integrated cache** (`max_integrated_cache_staleness_ms`): passed to `query_items` as `max_integrated_cache_staleness_in_ms` (azure-cosmos 4.14.0 and later); not to change-feed requests, which the integrated cache does not serve.
 - **Metrics**: per partition, rows, pages, RU (`x-ms-request-charge` via `response_hook`), retries, lag waits and duration. Logged at DEBUG, or WARNING with `log_metrics=true`, so they show in executor logs.
 
 ## 8. Schemas

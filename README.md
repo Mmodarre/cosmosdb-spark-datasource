@@ -182,6 +182,7 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `auth_type` | inferred | `key`, `service_principal`, `access_token`, `service_credential` or `default`. Inferred when exactly one credential option is set; `default` must be explicit. See [Authentication](#authentication). |
 | `account_key` | | Account key (`auth_type=key`) |
 | `tenant_id`, `client_id`, `client_secret` | | Entra ID service principal (`auth_type=service_principal`) |
+| `client_certificate`, `client_certificate_password` | | Service principal with a certificate instead of `client_secret`: the base64 of a PEM (private key and certificate) or PKCS#12 file, and its password if it has one |
 | `access_token`, `access_token_expires_on` | | Pre-minted bearer token. Expiry in epoch seconds or ISO-8601; read from the JWT `exp` claim if omitted (`auth_type=access_token`). |
 | `service_credential` | | Unity Catalog service credential name (`auth_type=service_credential`) |
 | `preferred_regions` | account default | Comma-separated read regions, e.g. `West Europe,North Europe` |
@@ -210,6 +211,8 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `raw_json_column` | `body` | Name of the column holding the whole document |
 | `corrupt_record_column` | `_corrupt_record` | Column that receives the JSON of malformed documents (only if it is in the schema) |
 | `log_metrics` | `false` | Log per-partition metrics (rows, pages, RU, retries, duration) at WARNING, so they appear in executor logs |
+| `slow_request_ms`, `slow_request_log_per_minute` | off, `10` | Log a WARNING for every page fetch slower than this, with activity ids, partitions, request charge, service-side duration and throttling retries; at most `slow_request_log_per_minute` lines per Python worker per minute (the number left out is reported). Batch, snapshot and change-feed reads. |
+| `max_integrated_cache_staleness_ms` | | Maximum staleness of results served by the [integrated cache](https://learn.microsoft.com/azure/cosmos-db/integrated-cache) of a dedicated gateway (queries; needs a dedicated-gateway endpoint and Session or Eventual consistency) |
 | `infer_schema` | `false` | Infer the schema from a sample of documents instead of returning raw JSON; batch reads only. See [Schema inference](#schema-inference). |
 | `sampling_size`, `sampling_query` | `1000`, `query` | Documents sampled for `infer_schema`, and the query that samples them (with `query_parameters`) |
 | `infer_system_properties`, `infer_timestamp` | `false` | Include `_rid`, `_self`, `_etag`, `_attachments` and `_ts` (`infer_timestamp`: `_ts` only) in the inferred schema |
@@ -466,6 +469,14 @@ opts = {
     "tenant_id": "<tenant-id>",
     "client_id": "<client-id>",
     "client_secret": dbutils.secrets.get("<scope>", "<secret-name>"),
+}
+
+# Service principal with a certificate: the base64 of the PEM or PKCS#12 file
+opts = {
+    "auth_type": "service_principal",
+    "tenant_id": "<tenant-id>",
+    "client_id": "<client-id>",
+    "client_certificate": dbutils.secrets.get("<scope>", "<certificate-base64>"),
 }
 
 # Unity Catalog service credential
