@@ -52,10 +52,16 @@ optionally `azure-identity`), which serverless environments and pipelines can in
 | Python | 3.10 to 3.13 | CI |
 | `azure-cosmos` | `>=4.14.0,<5` | CI: unit tests with 4.14.0 and with the latest 4.x; integration tests with 4.17.1 |
 | `azure-identity` (optional) | `>=1.19,<2` | unit tests only |
-| Databricks serverless jobs | environment version 4 | manually, with 0.2.0 and 0.3.1 (not in CI) |
-| Lakeflow SDP, serverless | DBR 18.3 | manually, with 0.2.0 and 0.3.1 (not in CI) |
-| Databricks classic compute | runtimes with Spark 4.0 or later | not tested |
-| Spark 3.x | | not supported: the Python Data Source API starts with Spark 4.0 |
+| Databricks serverless | environment version 2 or later | manually: environments 2 to 5, jobs and notebooks, with 0.2.0; environment 4 with 0.3.1 (not in CI) |
+| Databricks classic compute | DBR 15.4 LTS or later | manually with 0.2.0: DBR 15.4, 16.4, 17.3 (dedicated and standard access mode), 18.3 and 19.x (not in CI) |
+| Lakeflow SDP | DBR 18.3, serverless and classic | manually, with 0.2.0 and 0.3.1 (not in CI) |
+| OSS Spark 3.x | | not supported: the Python Data Source API starts with Spark 4.0 |
+
+Databricks runtimes built on Spark 3.5 from DBR 15.4 LTS (and serverless environments 2 and 3)
+include the streaming Python data source API; DBR 14.3 LTS and serverless environment 1 include
+only the batch API, and importing the package there fails with an `ImportError` that names the
+supported runtimes. Python 3.10 is therefore not usable on Databricks: only those two runtimes
+have it.
 
 The integration tests run against two Cosmos DB emulators in CI (see
 [CONTRIBUTING.md](CONTRIBUTING.md#integration-tests)). Neither emulator has `AllVersionsAndDeletes`

@@ -344,3 +344,41 @@ def test_version_comes_from_the_distribution_metadata() -> None:
     pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
     declared = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
     assert declared and cosmosdb_datasource.__version__ == version("cosmosdb-spark-datasource") == declared.group(1)
+
+
+@pytest.mark.parametrize(
+    ("datasource_module", "message"),
+    [
+        # DBR 14.3 LTS and serverless environment 1: Spark 3.5.0 with only the batch data source API
+        ("class DataSource: ...\nclass DataSourceReader: ...\n", "DataSourceStreamReader"),
+        (None, "needs PySpark"),
+    ],
+)
+def test_unsupported_runtimes_fail_with_the_minimum_versions(tmp_path, datasource_module, message) -> None:
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    if datasource_module is not None:
+        (tmp_path / "pyspark" / "sql").mkdir(parents=True)
+        (tmp_path / "pyspark" / "__init__.py").write_text('__version__ = "3.5.0"\n')
+        (tmp_path / "pyspark" / "sql" / "__init__.py").write_text("")
+        (tmp_path / "pyspark" / "sql" / "datasource.py").write_text(datasource_module)
+    else:
+        (tmp_path / "pyspark").mkdir()
+        (tmp_path / "pyspark" / "__init__.py").write_text("raise ImportError('no pyspark here')\n")
+    src = Path(__file__).resolve().parents[1] / "src"
+    result = subprocess.run(
+        [sys.executable, "-c", "import cosmosdb_datasource"],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), str(src)])},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert (
+        message in result.stderr
+        and "DBR 15.4 LTS" in result.stderr
+        and "serverless environment version 2" in result.stderr
+    )

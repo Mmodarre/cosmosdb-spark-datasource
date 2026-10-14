@@ -66,6 +66,9 @@ First public release.
   from a continuation rebuilt for the current partitions.
 - The version was defined twice (`pyproject.toml` and `_version.py`). `__version__` now reads the
   installed distribution's metadata, so `pyproject.toml` is the only source.
+- On runtimes without the streaming Python data source API (DBR 14.3 LTS, serverless environment
+  1) the import failed with a bare `ImportError`. It now names the supported runtimes: PySpark 4.0
+  or later, DBR 15.4 LTS or later, serverless environment version 2 or later.
 - After a container was deleted and re-created, a new stream (new checkpoint) failed on Python
   workers that had read the old container (`Invalid continuation: [Mismatch collection rid]`)
   until the workers restarted. A change-feed read now refreshes the client's cached container
