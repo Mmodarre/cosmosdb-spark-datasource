@@ -31,7 +31,7 @@ from cosmosdb_datasource.changefeed import (
     parse_etag_lsn,
 )
 from cosmosdb_datasource.documents import item_lsn
-from cosmosdb_datasource.errors import CosmosChangeFeedError, CosmosDataSourceError
+from cosmosdb_datasource.errors import CosmosChangeFeedError, CosmosDataSourceError, CosmosOffsetError
 from cosmosdb_datasource.options import MODE_LATEST_VERSION
 
 logger = logging.getLogger("cosmosdb_datasource")
@@ -60,6 +60,18 @@ def _server_time(headers: Any) -> float | None:
 def feed_range_dict(lo: str, hi: str) -> dict[str, Any]:
     """Return the feed range in the dict form accepted by ``feed_range=`` (``FeedRangeInternalEpk.to_dict``)."""
     return {"Range": {"min": lo, "max": hi, "isMinInclusive": True, "isMaxInclusive": False}}
+
+
+def _continuation(headers: Any) -> str | None:
+    """Return the change-feed continuation of one pager from its last response's headers.
+
+    ``ChangeFeedFetcherV2.fetch_change_feed_items`` writes the pager's composite state into the
+    ``etag`` of the response headers after the response hook received that same object (azure-cosmos
+    4.14.0 to 4.17.1). The pager's own ``continuation_token`` and the drained state after an HTTP
+    304 come from the client-wide ``last_response_headers`` instead, which concurrent requests on the
+    shared client overwrite.
+    """
+    return headers.get("etag") if headers is not None else None
 
 
 def _charge(headers: Any) -> float:
@@ -159,10 +171,14 @@ class SdkBackend:
         container_rid: str | None = None,
     ) -> Iterator[ChangeFeedPage]:
         charges: list[float] = []
+        last: list[Any] = [None]
 
         def hook(headers: Any, _body: Any) -> None:
             charges.append(_charge(headers))
+            last[0] = headers
 
+        if container_rid is not None:
+            self.ensure_rid(container_rid)
         rid = container_rid or self.rid
         token = resume_token or build_continuation(rid, mode, rng[0], rng[1], start_lsn)
         pager = self._container.query_items_change_feed(
@@ -171,29 +187,48 @@ class SdkBackend:
         pages = pager.by_page()
         for page in pages:
             items = list(page)
-            tok = pages.continuation_token
+            tok = _continuation(last[0])
             charge = sum(charges)
             charges.clear()
             yield ChangeFeedPage(items=items, positions=decode_positions(tok), resume_token=tok, request_charge=charge)
-        # The pager stops on HTTP 304 without updating ``continuation_token``; the SDK stores the
-        # refreshed composite state in the last response's etag (ChangeFeedFetcherV2).
-        headers = self._container.client_connection.last_response_headers or {}
-        tok = headers.get("etag")
+        # The pager stops on HTTP 304 without a page; the state after it is in the last response.
+        tok = _continuation(last[0])
         yield ChangeFeedPage(
             items=[], positions=decode_positions(tok), resume_token=tok, drained=True, request_charge=sum(charges)
         )
+
+    def ensure_rid(self, rid: str) -> None:
+        """Make the SDK's cached state match the container instance ``rid`` that a read was planned for.
+
+        A client caches container properties and the routing map per container link, so after the
+        container was deleted and re-created a worker that read the old instance would build
+        requests for it: azure-cosmos rejects a continuation of the new instance with "Invalid
+        continuation: [Mismatch collection rid]". ``ContainerProxy.read()`` refreshes the client's
+        properties cache (azure-cosmos 4.14.0 to 4.17.1), and a forced feed-range read the routing map.
+        """
+        if self._properties is not None and self._properties.get("_rid") == rid:
+            return
+        current = str(self.properties(refresh=True)["_rid"])
+        if current != rid:
+            raise CosmosOffsetError(
+                f"The container was re-created after this micro-batch was planned (planned rid={rid!r}, "
+                f"current rid={current!r}). Start the stream with a new checkpoint location."
+            )
+        self._container.read_feed_ranges(force_refresh=True)
 
     def _probe(
         self, rng: tuple[str, str], mode: str, start_time: str | datetime, *, want_positions: bool = False
     ) -> tuple[list[dict[str, Any]], list[int], list[Any], str | None]:
         etags: list[Any] = []
         sessions: list[str] = []
+        last: list[Any] = [None]
 
         def hook(headers: Any, _body: Any) -> None:
             etags.append(headers.get("etag"))
             token = headers.get(SESSION_TOKEN_HEADER)
             if token and token not in sessions:
                 sessions.append(str(token))
+            last[0] = headers
 
         pager = self._container.query_items_change_feed(
             feed_range=feed_range_dict(*rng),
@@ -209,9 +244,7 @@ class SdkBackend:
             first = list(page)
             break
         lsns = [parse_etag_lsn(e) for e in etags if e]
-        # continuation_token comes from the client-wide last_response_headers: only read it when
-        # the caller runs probes sequentially (resolve_start).
-        positions = decode_positions(pages.continuation_token) if first and want_positions else []
+        positions = decode_positions(_continuation(last[0])) if first and want_positions else []
         # One response per physical partition; several only if the range was split meanwhile.
         return first, lsns, positions, ",".join(sessions) or None
 
