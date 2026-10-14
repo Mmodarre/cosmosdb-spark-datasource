@@ -18,9 +18,9 @@ source).
 
 | Status | Rows |
 |---|---|
-| Supported | 20 |
+| Supported | 21 |
 | Partially | 11 |
-| Missing | 10 |
+| Missing | 9 |
 | N/A | 4 |
 | Not verified | 1 |
 
@@ -41,7 +41,7 @@ source).
 | Capability | Connector | This data source | Notes |
 |---|---|---|---|
 | Raw JSON | `spark.cosmos.read.inferSchema.enabled=false` (`_rawBody, id, _ts`) | **Supported**: default schema `id, pk, _ts, _etag, body` | |
-| Schema inference by sampling | `spark.cosmos.read.inferSchema.enabled` (default `true`), `.samplingSize` (1000), `.query`, `.includeSystemProperties`, `.includeTimestamp`, `.forceNullableProperties` | **Missing** | `parse_json(body)` or a user schema instead. |
+| Schema inference by sampling | `spark.cosmos.read.inferSchema.enabled` (default `true`), `.samplingSize` (1000), `.query`, `.includeSystemProperties`, `.includeTimestamp`, `.forceNullableProperties` | **Supported**: `infer_schema` (default `false`), `sampling_size` (1000), `sampling_query`, `infer_system_properties`, `infer_timestamp`; columns are always nullable | The same merge rules; integers are BIGINT (the connector infers INT or BIGINT), and the sample is spread over all physical partitions (the connector reads `TOP n` from the first ones). |
 | User-specified schema | `.schema(...)`, `spark.cosmos.read.schemaConversionMode` `Relaxed` / `Strict` | **Supported**: `.schema(...)`, `mode` `PERMISSIVE` / `DROPMALFORMED` / `FAILFAST`, corrupt-record column | Conversions are documented and never lossy. |
 | Predicate pushdown | Automatic: `EqualTo`, `EqualNullSafe`, ranges, `In`, `IsNull`, `IsNotNull`, `StringStartsWith` / `EndsWith` / `Contains`, `And`, `Or`, `Not` | **Partially**: `filter_pushdown=true` or `auto` with `spark.sql.python.filterPushdown.enabled=true`, PySpark 4.1+; the same filters, each optionally negated | Spark's Python API pushes conjunctions of leaves only, never `Or`. Spark 4.1 to 4.3 reuse the read planned with pushed filters for other scans of the same loaded DataFrame, so each filtered query needs its own `load()`. A 1% equality filter over 200,000 documents: 81 RU instead of 4,603. |
 | Custom query | `spark.cosmos.read.customQuery` | **Supported**: `query`, `query_parameters` | Run per input partition in both. |

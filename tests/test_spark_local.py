@@ -157,3 +157,10 @@ def test_filter_pushdown_matches_spark_filtering(spark) -> None:
                 load("true").filter("id = 'd005'").collect()
     finally:
         spark.conf.unset(conf)
+
+
+def test_inferred_schema(spark) -> None:
+    store = _store("spark_infer", docs=200)
+    df = spark.read.format("cosmosdb").options(**fake_options(store, infer_schema="true", sampling_size="50")).load()
+    assert df.schema.simpleString() == "struct<id:string,pk:string,v:bigint,nested:struct<x:bigint>>"
+    assert df.filter("nested.x = v").count() == 200

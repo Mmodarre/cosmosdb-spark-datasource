@@ -58,6 +58,8 @@ DEFAULT_QUERY = "SELECT * FROM c"
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_RAW_COLUMN = "body"
 DEFAULT_CORRUPT_COLUMN = "_corrupt_record"
+DEFAULT_SAMPLING_SIZE = 1000
+INFERENCE_OPTIONS = ("sampling_size", "sampling_query", "infer_system_properties", "infer_timestamp")
 AUTO = "auto"
 
 # Options that only make sense for readStream; their presence also selects the change-feed
@@ -128,6 +130,11 @@ KNOWN_OPTIONS = frozenset(
         "snapshot_stream",
         "snapshot_interval_seconds",
         "filter_pushdown",
+        "infer_schema",
+        "sampling_size",
+        "sampling_query",
+        "infer_system_properties",
+        "infer_timestamp",
         TEST_BACKEND_OPTION,
         # Spark may add "path" when .load(path) is used; we ignore it.
         "path",
@@ -269,6 +276,11 @@ class CosmosOptions:
     snapshot_stream: bool = False
     snapshot_interval_seconds: float = 0.0
     filter_pushdown: str = "false"  # "false" | "true" | "auto"
+    infer_schema: bool = False
+    sampling_size: int = DEFAULT_SAMPLING_SIZE
+    sampling_query: str | None = None
+    infer_system_properties: bool = False
+    infer_timestamp: bool = False
     stream_options_present: tuple[str, ...] = ()
     query_explicit: bool = False
     test_backend: str | None = None
@@ -486,6 +498,22 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
     elif _get(opts, "snapshot_interval_seconds") is not None:
         raise CosmosConfigError("Option 'snapshot_interval_seconds' only applies with snapshot_stream=true.")
 
+    infer = _bool(opts, "infer_schema", False)
+    if infer:
+        streaming = [
+            *(n for n in STREAM_ONLY_OPTIONS if _get(opts, n) is not None),
+            *(["snapshot_stream"] if snapshot_stream else []),
+        ]
+        if streaming:
+            raise CosmosConfigError(
+                f"Option 'infer_schema' applies to batch reads, not with {', '.join(streaming)}; supply a schema "
+                "with .schema(...) for streams."
+            )
+    else:
+        stray = [n for n in INFERENCE_OPTIONS if _get(opts, n) is not None]
+        if stray:
+            raise CosmosConfigError(f"Option(s) {', '.join(stray)} only apply with infer_schema=true.")
+
     query = _get(opts, "query")
     raw_column = _get(opts, "raw_json_column", DEFAULT_RAW_COLUMN) or DEFAULT_RAW_COLUMN
     corrupt_column = _get(opts, "corrupt_record_column", DEFAULT_CORRUPT_COLUMN) or DEFAULT_CORRUPT_COLUMN
@@ -533,6 +561,11 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
         snapshot_stream=snapshot_stream,
         snapshot_interval_seconds=_float(opts, "snapshot_interval_seconds", 0.0, minimum=0.0),
         filter_pushdown=_parse_filter_pushdown(_get(opts, "filter_pushdown")),
+        infer_schema=infer,
+        sampling_size=_int(opts, "sampling_size", DEFAULT_SAMPLING_SIZE, minimum=1),  # type: ignore[arg-type]
+        sampling_query=_get(opts, "sampling_query"),
+        infer_system_properties=_bool(opts, "infer_system_properties", False),
+        infer_timestamp=_bool(opts, "infer_timestamp", False),
         stream_options_present=tuple(n for n in STREAM_ONLY_OPTIONS if _get(opts, n) is not None),
         query_explicit=query is not None,
         test_backend=test_backend,

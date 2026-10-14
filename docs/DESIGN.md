@@ -497,6 +497,22 @@ Virtual columns:
 Every other column is a top-level document property (exact name, then case-insensitive),
 converted safely. See README for the conversion table.
 
+**Inference** (`infer_schema=true`, `inference.py`). `schema()` runs on the driver once per `load()`,
+only without a user schema, so the sample is read there: `ceil(sampling_size / feed ranges)`
+results of the sampling query per physical partition, partitions in parallel, through the batch
+query loop with `max_item_count` capped at the per-partition share. Types merge like the
+connector's `CosmosTableSchemaInferrer` (`TypeCoercion.findTightestCommonType`, then struct and
+array merges, else STRING). Integers are always BIGINT: Python's JSON parser does not tell 32 from
+64 bits, and a later document may not fit an INT. Fields stay in first-appearance order, so the
+schema is a function of the sample alone. A property the row builder would not read from the
+document (`pk`, the raw JSON and corrupt-record columns, `feed_range`) is not inferred; `pk` is
+added as the rendered key when sampled documents have one. Verified (service): integral doubles
+come back without a fraction (`140.0` as `140`), so sampled numbers cannot reveal a DOUBLE
+property whose sampled values are all integral. Tests (`tests/test_inference.py`): type and merge
+tables, layout and system properties, the sample's spread and bound, sampling and user queries,
+option validation, and a typed read with a value outside the sample; local Spark and integration
+tests read with the inferred schema.
+
 ## 9. Test strategy
 
 - Unit (no network): EPK properties, options/auth/redaction, conversion and modes, token codec through the **SDK's own parser**, scripted change-feed page sequences (splits, lag, throttling, budgets), offsets (byte-stable JSON, validation, re-keying).

@@ -206,6 +206,9 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `raw_json_column` | `body` | Name of the column holding the whole document |
 | `corrupt_record_column` | `_corrupt_record` | Column that receives the JSON of malformed documents (only if it is in the schema) |
 | `log_metrics` | `false` | Log per-partition metrics (rows, pages, RU, retries, duration) at WARNING, so they appear in executor logs |
+| `infer_schema` | `false` | Infer the schema from a sample of documents instead of returning raw JSON; batch reads only. See [Schema inference](#schema-inference). |
+| `sampling_size`, `sampling_query` | `1000`, `query` | Documents sampled for `infer_schema`, and the query that samples them (with `query_parameters`) |
+| `infer_system_properties`, `infer_timestamp` | `false` | Include `_rid`, `_self`, `_etag`, `_attachments` and `_ts` (`infer_timestamp`: `_ts` only) in the inferred schema |
 | `filter_pushdown` | `false` | `true`: push Spark filters into the query (PySpark 4.1+; needs `spark.sql.python.filterPushdown.enabled=true`, else planning fails with `DATA_SOURCE_PUSHDOWN_DISABLED`). `auto`: push only while that conf is true. See [Filter pushdown](#filter-pushdown). |
 
 ### Filter pushdown
@@ -334,6 +337,36 @@ them.
 
 JSON null and undefined are different logical partitions on the service, so they render
 differently. A string that reads like another value (`"null"`, `"123"`) renders like that value.
+
+### Schema inference
+
+With `infer_schema=true` and no `.schema(...)`, the schema is inferred on the driver from up to
+`sampling_size` results of `sampling_query` (default: `query`), spread evenly over the physical
+partitions:
+
+```python
+events = spark.read.format("cosmosdb").options(**conn, container="events", infer_schema="true").load()
+events.printSchema()  # id, pk, then every property: seq bigint, device struct<...>, tags array<string>, ...
+```
+
+- Columns: `id`, `pk` (if the sampled documents have them), then every property in the order it
+  first appears. System properties and `_ts` are left out unless `infer_system_properties` or
+  `infer_timestamp` is set. The raw JSON column is not included; declare a schema to have both.
+- Types: strings STRING, booleans BOOLEAN, integers BIGINT, other numbers DOUBLE, objects STRUCT,
+  arrays ARRAY. Values of one property merge to the tightest type both fit: BIGINT and DOUBLE give
+  DOUBLE, structs merge their fields, arrays their elements, and any other mix (for example a
+  number in one document and a string in another) gives STRING, which holds numbers, objects and
+  arrays as JSON text. A property that is null or an empty array in every sample is STRING.
+- Every column is nullable, and the read converts each document to the inferred types like a
+  declared schema. A value of another type in a document outside the sample is null, or handled
+  as `mode` says.
+- The service returns an integral number without a fraction (`140.0` is read as `140`), so a
+  property whose sampled values are all integral is BIGINT even if other documents hold
+  fractions; those read as null. Raise `sampling_size` or declare the schema.
+- Timestamps stored as ISO strings are STRING; convert them in Spark. The sample costs about one
+  query page per physical partition (about 23 RU per 1,000 documents of 0.55 KB) when `load()`
+  runs, and favours the oldest documents of each partition (queries return them in insertion
+  order).
 
 ### User-specified schemas
 
