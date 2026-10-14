@@ -251,7 +251,7 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
         )
         for doc in docs:
             if isinstance(doc, Mapping):
-                view = RecordView(doc, id=doc.get("id"), pk=pk.extract(doc), feed_range=partition.feed_range)
+                view = RecordView(doc, id=doc.get("id"), pk=pk.render(doc), feed_range=partition.feed_range)
             else:  # SELECT VALUE <scalar>
                 view = RecordView(None, feed_range=partition.feed_range)
                 view.doc = doc

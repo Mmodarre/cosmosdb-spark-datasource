@@ -36,6 +36,13 @@ First public release.
 - A document deleted and re-created during a query read was returned twice. Each `(pk, id)` is now
   returned at most once per read; the keys are kept in bounded memory (8 bytes per document,
   spilled to a temporary file beyond about 32 MiB).
+- AllVersionsAndDeletes delete rows rendered a numeric partition key above 2^53 as the double the
+  service reports (`9007199254740992`, `9.223372036854776e+18`) while the document's other rows
+  showed the exact integer, so deletes never matched their key. Every row now renders numbers as
+  the double the service hashes.
+- JSON-null and undefined partition keys both rendered as `pk = NULL`, so two documents could
+  share a key. JSON null now renders as `null`; undefined stays NULL (`{}` inside a hierarchical
+  key).
 - With `initial_snapshot` and `Trigger.AvailableNow` (PySpark 4.2, Databricks), the first run ended
   after the snapshot, so the changes made while it was read waited for the next run. The run's
   target is now moved once after the snapshot, and the first run drains them.

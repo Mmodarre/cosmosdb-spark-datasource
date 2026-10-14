@@ -27,7 +27,7 @@ from pyspark.sql.types import (
 )
 from pyspark.sql.worker.plan_data_source_read import records_to_arrow_batches
 
-from cosmosdb_datasource.documents import PartitionKeyInfo, parse_path, to_change_record
+from cosmosdb_datasource.documents import PartitionKeyInfo, parse_path, to_change_record, to_snapshot_record
 from cosmosdb_datasource.errors import CosmosChangeFeedError, CosmosConfigError, CosmosConversionError
 from cosmosdb_datasource.schema import (
     RecordView,
@@ -236,6 +236,72 @@ def test_partition_key_extraction(paths, doc, expected, rendered) -> None:
     assert build_converter(StringType())(info.extract(doc)) == rendered
 
 
+@pytest.mark.parametrize(
+    ("paths", "doc", "rendered"),
+    [
+        (("/pk",), {"pk": "p1"}, "p1"),
+        (("/pk",), {"pk": 7}, "7"),
+        (("/pk",), {"pk": 7.0}, "7"),
+        (("/pk",), {"pk": 2.5}, "2.5"),
+        (("/pk",), {"pk": -0.0}, "0"),
+        (("/pk",), {"pk": 2**53 + 1}, str(2**53)),  # the double the service hashes
+        (("/pk",), {"pk": 2**63 - 1}, str(2**63)),
+        (("/pk",), {"pk": 1e20}, "100000000000000000000"),
+        (("/pk",), {"pk": 10**400}, str(10**400)),  # beyond the double range: kept as written
+        (("/pk",), {"pk": True}, "true"),
+        (("/pk",), {"pk": None}, "null"),
+        (("/pk",), {"other": 1}, None),
+        (("/a/b",), {"a": {"c": 1}}, None),
+        (("/a/b",), {"a": {"b": None}}, "null"),
+        (("/t", "/u"), {"t": "T", "u": 2**53 + 1}, f'["T",{2**53}]'),
+        (("/t", "/u"), {"t": "T", "u": None}, '["T",null]'),
+        (("/t", "/u"), {"t": "T"}, '["T",{}]'),
+    ],
+)
+def test_partition_key_rendering(paths, doc, rendered) -> None:
+    info = PartitionKeyInfo(paths=paths, kind="MultiHash" if len(paths) > 1 else "Hash", version=2)
+    assert info.render(doc) == rendered
+
+
+def _avad_delete(meta_pk: object = ..., lsn: int = 5) -> dict:
+    meta = {"operationType": "delete", "lsn": lsn, "crts": 1791990000, "id": "a", "previousImageLSN": lsn - 1}
+    if meta_pk is not ...:
+        meta["partitionKey"] = meta_pk
+    return {"current": {}, "metadata": meta}
+
+
+@pytest.mark.parametrize(
+    ("written", "reported"),
+    # what the service stored in the document, and reported in the delete metadata
+    [(2**53 + 1, 2**53), (2**63 - 1, 9.223372036854776e18), (12345, 12345), (2.5, 2.5), ("s", "s"), (True, True)],
+)
+def test_every_row_of_a_document_has_the_same_pk(written, reported) -> None:
+    doc = {"id": "a", "pk": written, "_ts": 1791990000}
+    create = {"current": doc, "metadata": {"operationType": "create", "lsn": 4, "crts": 1791990000}}
+    rows = (
+        to_snapshot_record(doc, INFO2).pk,
+        to_change_record(create, "AllVersionsAndDeletes", INFO2).pk,
+        to_change_record({**doc, "_lsn": 4}, "LatestVersion", INFO2).pk,
+        to_change_record(_avad_delete({"pk": reported}), "AllVersionsAndDeletes", INFO2).pk,
+    )
+    assert len(set(rows)) == 1, rows
+
+
+def test_json_null_and_undefined_partition_keys_differ() -> None:
+    null_doc, undefined_doc = {"id": "a", "pk": None, "_ts": 1}, {"id": "a", "_ts": 1}
+    assert to_snapshot_record(null_doc, INFO2).pk == "null"
+    assert to_snapshot_record(undefined_doc, INFO2).pk is None
+    # delete metadata as reported by the service: {"pk": null} for JSON null, null for undefined
+    assert to_change_record(_avad_delete({"pk": None}), "AllVersionsAndDeletes", INFO2).pk == "null"
+    assert to_change_record(_avad_delete(None), "AllVersionsAndDeletes", INFO2).pk is None
+    assert to_change_record(_avad_delete(), "AllVersionsAndDeletes", INFO2).pk is None
+    hierarchical = PartitionKeyInfo(paths=("/t", "/u"), kind="MultiHash", version=2)
+    assert to_change_record(_avad_delete({"t": "x"}), "AllVersionsAndDeletes", hierarchical).pk == '["x",{}]'
+    assert to_change_record(_avad_delete({"t": "x", "u": None}), "AllVersionsAndDeletes", hierarchical).pk == (
+        '["x",null]'
+    )
+
+
 def test_parse_path_and_container_properties() -> None:
     assert parse_path("/a/b/c") == ("a", "b", "c")
     with pytest.raises(ValueError):
@@ -249,6 +315,7 @@ def test_parse_path_and_container_properties() -> None:
 
 
 PK = PartitionKeyInfo(paths=("/deviceId",), kind="Hash", version=2)
+INFO2 = PartitionKeyInfo(paths=("/pk",), kind="Hash", version=2)
 
 
 def test_latest_version_item() -> None:
@@ -296,7 +363,7 @@ def test_avad_hierarchical_delete_partition_key() -> None:
     info = PartitionKeyInfo(paths=("/tenantId", "/userId"), kind="MultiHash", version=2)
     for meta_pk in ({"tenantId": "t", "userId": "u"}, {"/tenantId": "t", "/userId": "u"}, ["t", "u"]):
         item = {"metadata": {"operationType": "delete", "lsn": 1, "crts": 1, "id": "x", "partitionKey": meta_pk}}
-        assert to_change_record(item, "AllVersionsAndDeletes", info).pk == ["t", "u"]
+        assert to_change_record(item, "AllVersionsAndDeletes", info).pk == '["t","u"]'
 
 
 def test_wide_decimals_and_timestamp_edge_cases() -> None:

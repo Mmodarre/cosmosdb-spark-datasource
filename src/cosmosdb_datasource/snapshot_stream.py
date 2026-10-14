@@ -227,7 +227,7 @@ class CosmosSnapshotStreamReader(CosmosReaderBase, DataSourceStreamReader, _Avai
                 view = RecordView(
                     doc,
                     id=doc.get("id"),
-                    pk=pk.extract(doc),
+                    pk=pk.render(doc),
                     feed_range=partition.feed_range,
                     snapshot_ts=partition.snapshot_ts,
                 )
