@@ -7,29 +7,31 @@ Azure Cosmos DB Spark connector (`azure-cosmos-spark`). Times are UTC, October 2
 logs, repro scripts) is kept with the test harness and is not part of this repository; the GitHub Actions runs
 cited below are public.
 
-**Last build tested:** release candidate RC2, `cosmosdb_spark_datasource-1.0.0-py3-none-any.whl`, sha256
-`5db8b4eb190a8d36660326ac9bd799eb2343208cd238ef0a8bfcb0e5455b2003`, built unmodified from commit `002b65d`. The
-findings of the RC2 round were fixed or documented after it (section 12); those changes are covered by CI.
+**Latest build checked:** `cosmosdb_spark_datasource-1.0.0-py3-none-any.whl` from commit `ad1c9bb` (release
+candidate 5), sha256 `cbd207f8a3fee06cd043497caa4f6be944c5e5494c2865a5bbfd9d8f3588d6a5`. The benchmark and the
+correctness checks ran on release candidate 2 (`002b65d`); later candidates change only option validation, the
+filter-pushdown gate, certificate errors and `read_many`. The 1.0.0 release is tagged on the next commit, which
+changes only this file.
 
 **How the final round was run.** The full validation ran on a pre-release build of commit `59c8bd1`
 (`0.4.0.dev1`, sha256 `b78091c019ca6ba68015713b19f7af64e19ff88654666dea312b56eded1b365b`, only the version string
-changed). The defects it found were fixed for 1.0.0, and two release candidates were re-checked on the affected
+changed). The defects it found were fixed for 1.0.0, and the release candidates were re-checked on the affected
 paths: RC1 (`b4f987a`, sha256 `df0d0533c2ec2ebdd37b7f2c0a45d84b16392ad3f287e13728395041b0c4070f`) and RC2
-(`002b65d`).
+(`002b65d`), then RC3 (`5eca301`), RC4 (`e8fce2a`) and RC5 (`ad1c9bb`) after further fixes.
 
 ## Summary
 
 | Area | Builds | What was tested | Result |
 |---|---|---|---|
-| Unit tests and CI | 0.2.0 to 1.0.0 | the package suite (service fake, JVM-backed local Spark) on Python 3.10-3.13 x PySpark 4.0-4.2 x azure-cosmos 4.14.0 / 4.17.1; emulator integration tests | **PASS** on every build; RC2: 703 passed (PySpark 4.2), 685 + 18 skipped (4.0, 4.1), coverage 95% |
+| Unit tests and CI | 0.2.0 to 1.0.0 RC5 | the package suite (service fake, JVM-backed local Spark) on Python 3.10-3.13 x PySpark 4.0-4.2 x azure-cosmos 4.14.0 / 4.17.1; emulator integration tests | **PASS** on every build; RC5: 722 passed (PySpark 4.2), 704 + 18 skipped (4.0, 4.1), coverage 95% |
 | Local Apache Spark against the service | 0.2.0, 0.4.0.dev1 | OSS Spark 4.0.4 / 4.1.3 / 4.2.0: batch reads, streams, AllVersionsAndDeletes + initial snapshot under a logged writer, the options added since 0.2.0 | **PASS**; one defect on PySpark 4.2 (empty change-feed batch reads), fixed in 1.0.0 |
 | Live QA against the service | 0.2.0 (34 cases), 0.4.0.dev1 (regression) | live splits, many partitions, re-creates, every key shape, extreme values, TTL, caps, transactional batches, consistency levels, multi-region writes, auth, 429s, network faults | core correctness held in both rounds; 8 defects found in 0.2.0, all fixed |
-| Databricks runtime matrix | 0.2.0, 0.4.0.dev1, RC1, RC2 | DBR 14.3-19.x, standard access mode, serverless environments 1-5, auth paths, AvailableNow behaviour, SDP on classic | **PASS** on DBR 15.4 to 19.x and serverless 2-5; defects found on the way are fixed in 1.0.0 |
+| Databricks runtime matrix | 0.2.0, 0.4.0.dev1, RC1-RC5 | DBR 14.3-19.x, standard access mode, serverless environments 1-5, auth paths, AvailableNow behaviour, SDP on classic | **PASS** on DBR 15.4 to 19.x and serverless 2-5; defects found on the way are fixed in 1.0.0 |
 | Lakeflow SDP pipelines | 0.2.0, 0.3.x | CDC SCD1 with initial snapshot, LatestVersion, SCD2 snapshots, stops, replays, full refreshes, reconciled against Cosmos DB | **PASS** |
 | Lakehouse Plumber project | 0.3.1 | generated pipelines and job, three rounds with mutations | **PASS** |
 | Benchmark vs `azure-cosmos-spark` 4.50.0 | 0.2.0, 0.4.0.dev1, RC2 | 10M documents on classic DBR 17.3: full reads, filters, change feed, point reads, RU budgets | client-bound reads take **about 2x (raw) to 2.5x (typed)** the connector's time (0.2.0: 2.4x / 3.4x); RU equal or 8% lower; correctness exact; details and the reasons in section 7 |
-| Databricks serverless | 0.4.0.dev1, RC1, RC2 | pushdown, Arrow, volume checkpoints, change feed batch reads, snapshot streams, initial snapshot, point reads | **PASS**; filter pushdown is not available on serverless (the Spark conf cannot be set); `arrow_batches=true` works |
-| Managed identity (UC service credential) | 0.4.0.dev1, RC1, RC2 | token minted on the driver in a serverless job, a classic job and SDP pipeline code | **PASS** everywhere, least privilege shown; tokens last about 24 hours |
+| Databricks serverless | 0.4.0.dev1, RC1-RC5 | pushdown, Arrow, volume checkpoints, change feed batch reads, snapshot streams, initial snapshot, point reads | **PASS**; filter pushdown is not available on serverless (the Spark conf cannot be set); `arrow_batches=true` works |
+| Managed identity (UC service credential) | 0.4.0.dev1, RC1-RC3 | token minted on the driver in a serverless job, a classic job and SDP pipeline code | **PASS** everywhere, least privilege shown; tokens last about 24 hours |
 
 ## Builds
 
@@ -39,7 +41,10 @@ paths: RC1 (`b4f987a`, sha256 `df0d0533c2ec2ebdd37b7f2c0a45d84b16392ad3f287e1372
 | 0.3.0 / 0.3.1 | `2848ff571d81b7efe4848548018935d1a73314d96ceab0e5efb00da13a7ed69b` / `1b777cb02733e4e510a9d50088034eacc764fffa8612bc7336ea725f8666d807` | second pipeline round, Lakehouse Plumber verification |
 | 0.4.0.dev1 (`59c8bd1`) | `b78091c019ca6ba68015713b19f7af64e19ff88654666dea312b56eded1b365b` | final validation round |
 | 1.0.0 RC1 (`b4f987a`) | `df0d0533c2ec2ebdd37b7f2c0a45d84b16392ad3f287e13728395041b0c4070f` | re-check of the fixes |
-| **1.0.0 RC2 (`002b65d`)** | `5db8b4eb190a8d36660326ac9bd799eb2343208cd238ef0a8bfcb0e5455b2003` | re-check of the fixes, benchmark re-check, correctness |
+| 1.0.0 RC2 (`002b65d`) | `5db8b4eb190a8d36660326ac9bd799eb2343208cd238ef0a8bfcb0e5455b2003` | re-check of the fixes, benchmark re-check, correctness |
+| 1.0.0 RC3 (`5eca301`) | `55f3b33e9d7c9598229b857053f05ab917be984f72e24d901679fde1a081daea` | live re-check of the pushdown gate, certificate errors, `read_many` de-duplication |
+| 1.0.0 RC4 (`e8fce2a`) | `0e1c433a680cf84d88bcf42fa4f2e94a3227184c5f076c0179ab7c5ec443eb19` | re-check of the `read_many` fix |
+| **1.0.0 RC5 (`ad1c9bb`)** | `cbd207f8a3fee06cd043497caa4f6be944c5e5494c2865a5bbfd9d8f3588d6a5` | re-check of the filter-pushdown gate |
 
 ## 1. Unit tests and CI
 
@@ -52,7 +57,10 @@ tokens) and includes JVM-backed local Spark tests; integration tests run against
 | 0.3.0 | PySpark 4.2.0, 4.1.1, 4.0.1; live integration tests against an account | PASS: 321 passed (4.2), 304 passed + 19 skipped (4.0, 4.1) |
 | `59c8bd1` (0.4.0.dev1) | GitHub Actions [CI run 38661091532](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/runs/38661091532): lint, type check, build, 15 test jobs (Python 3.10-3.13 x PySpark 4.0 / 4.1 / 4.2, azure-cosmos 4.17.1, plus 4.14.0 and latest on 4.2); [integration run 38660465891](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/runs/38660465891) on the same tree; the same suite against the built wheel in 10 clean local environments | PASS: 580 passed (4.2), 562 passed + 18 skipped (4.0, 4.1); coverage 94%; emulators: 16 and 22 integration tests passed |
 | `b4f987a` (RC1) | [CI run 38678997303](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/runs/38678997303); integration on the pull request head | PASS: 695 passed (4.2), 677 passed + 18 skipped (4.0, 4.1); 6 emulator jobs passed |
-| **`002b65d` (RC2)** | [CI run 38683029926](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/runs/38683029926) (19 jobs); [integration run 38681722665](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/runs/38681722665) on the pull request head | **PASS**: 703 passed (4.2), 685 passed + 18 skipped (4.0, 4.1); `test_spark_local` 10 passed in every job; coverage 95%; 6 emulator jobs (azure-cosmos minimum and latest) passed; the job that needs an Azure account was skipped |
+| `002b65d` (RC2) | [CI run 38683029926](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/runs/38683029926) (19 jobs); [integration run 38681722665](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/runs/38681722665) on the pull request head | **PASS**: 703 passed (4.2), 685 passed + 18 skipped (4.0, 4.1); `test_spark_local` 10 passed in every job; coverage 95%; 6 emulator jobs (azure-cosmos minimum and latest) passed; the job that needs an Azure account was skipped |
+| `5eca301` (RC3) | [CI run 38694055797](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/runs/38694055797) | **PASS**: 713 passed (4.2), 695 passed + 18 skipped (4.0, 4.1); coverage 95%; integration passed |
+| `e8fce2a` (RC4) | [CI run 38696523420](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/runs/38696523420); [integration run 38695976001](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/runs/38695976001) on the pull request head | **PASS**: 714 passed (4.2), 696 passed + 18 skipped (4.0, 4.1); `test_spark_local` 11 passed; coverage 95% |
+| **`ad1c9bb` (RC5)** | [CI run 38706568304](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/runs/38706568304); [integration run 38705795104](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/runs/38705795104) on the pull request head | **PASS**: 722 passed (4.2), 704 passed + 18 skipped (4.0, 4.1); `test_spark_local` 11 passed; coverage 95% |
 
 ## 2. Local Apache Spark against the service
 
@@ -159,7 +167,7 @@ package: 5,000-item pages, one page read ahead, Arrow batches; the connector: 1,
 | RU budget 2,000 and 5,000 RU/s: achieved rate | 500 / 1,200 RU/s (25% of the target; client-side throughput control with a global control container) | - | **1,946 / 4,835 RU/s (97%)** with `target_ru_per_second` | - | - |
 | RU per 1,000 documents (scan) / per 1,000 changes | 23.02 / 57.53 | 23.0 / 57.6 | 21.21 / 57.52 | 0.92x / 1.00x | 1.00x / 1.00x |
 | Executor CPU per raw full read | 146 CPU-s | 332 | 404 | 2.8x | 2.7x |
-| **RC2: full read raw / typed, 4 workers (connector in the same session)** | 11.8 / 10.9 s | - | **23.7 / 27.3 s** (RC2) | **2.01x / 2.50x** | - |
+| **1.0.0 RC2: full read raw / typed, 4 workers (connector in the same session)** | 11.8 / 10.9 s | - | **23.7 / 27.3 s** (RC2) | **2.01x / 2.50x** | - |
 
 **Where this package is still slower, and why.**
 - **Per-document CPU in Python.** With one Spark task per physical partition, each task reads about 26,000
@@ -181,7 +189,7 @@ package: 5,000-item pages, one page read ahead, Arrow batches; the connector: 1,
 - The connector's client-side throughput control used a quarter of its target in this set-up (one control
   container, 4 executors); the cause was not investigated.
 
-**Correctness.** On RC2, a full read of the 10M documents to Delta was compared with a plain-SDK
+**Correctness.** On 1.0.0 RC2, a full read of the 10M documents to Delta was compared with a plain-SDK
 ground truth (`SELECT c.id, c._ts FROM c`, itself checked against the generator's id range): 10,000,000 rows,
 10,000,000 distinct ids, 0 missing, 0 extra, 0 `_ts` mismatches, for this package and for the connector; 20,105
 sampled document bodies were identical between the two. An AllVersionsAndDeletes capture of 12,400 point
@@ -193,7 +201,7 @@ write. The connector reports `_ts = -1` for deletes; this package reports the de
 
 Serverless jobs on environment versions 2 to 5 (client PySpark 3.5.0, 3.5.2, 4.0.0, 4.1.0; server Spark 4.2.0),
 the wheel as an environment dependency, the installed package files checked against the wheel in every run.
-Build 0.4.0.dev1, re-checked on RC1 and RC2 (section 11).
+Build 0.4.0.dev1, re-checked on RC1 to RC5 (section 11).
 
 | Case | Result |
 |---|---|
@@ -219,9 +227,9 @@ Build 0.4.0.dev1, re-checked on RC1 and RC2 (section 11).
 
   | Where | Build | Result |
   |---|---|---|
-  | Serverless job (environment 4) | 0.4.0.dev1 | **PASS**: batch read 200/200, AvailableNow stream 200/200, a write with the same token refused (403) |
+  | Serverless job (environment 4) | 0.4.0.dev1, RC3 | **PASS**: batch read 200/200, AvailableNow stream 200/200, a write with the same token refused (403) |
   | Classic DBR 17.3 LTS job | 0.4.0.dev1 | **PASS** (same checks) |
-  | Serverless SDP pipeline, token minted in the pipeline source | 0.4.0.dev1, RC1, **RC2** | **PASS** on all three: `dbutils.credentials.getServiceCredentialsProvider` works in pipeline code; streaming table 200 rows, 200 distinct |
+  | Serverless SDP pipeline, token minted in the pipeline source | 0.4.0.dev1, RC1, RC2 | **PASS** on all three: `dbutils.credentials.getServiceCredentialsProvider` works in pipeline code; streaming table 200 rows, 200 distinct |
 
   The tokens lasted about **24 hours** (81,044 to 86,398 s at mint time). Each triggered pipeline update mints a new
   token; a continuous pipeline or a long-running stream keeps the token it started with, so use
@@ -235,7 +243,7 @@ A probe data source that returns its own option keys ran on serverless environme
 17.3 (dedicated and standard access mode) and in a serverless SDP pipeline (a materialized view and a streaming
 table). The result was identical everywhere: `spark.read...schema(...)` adds `isuserspecifiedschema`;
 `load("somepath")` adds `path`; option names reach the data source lowercased; `readStream` adds nothing, with or
-without a schema. 1.0.0 accepts and ignores these keys.
+without a schema. 1.0.0 (from RC2) accepts and ignores these keys.
 
 ## 11. Release-candidate re-checks
 
@@ -250,6 +258,19 @@ without a schema. 1.0.0 accepts and ignores these keys.
 | SDP pipeline with managed identity | pass | pass |
 | Benchmark full read raw / typed, 4 workers | - | 23.7 s / 27.3 s, no regression against 0.4.0.dev1 (24.3 s / 26.3 s); the same RU per read |
 | Correctness (10M-document full read; AllVersionsAndDeletes capture) | - | exact; identical to the connector |
+
+**RC3 (`5eca301`), RC4 (`e8fce2a`) and RC5 (`ad1c9bb`).**
+
+| Check | Runtime | Result |
+|---|---|---|
+| `filter_pushdown=true` where Spark has no pushdown API | DBR 15.4 | raises with guidance (RC3); `auto` and `false` read correctly |
+| `filter_pushdown=true` with `spark.sql.python.filterPushdown.enabled=true` | DBR 16.4 | **accepted but nothing is pushed** (every variant costs a full scan; rows correct). A probe data source shows that Spark on DBR 16.4 never calls `pushFilters`, although `DataSourceReader.pushFilters` and the pushdown planner module exist. **Fixed in RC5**: `true` raises on classic runtimes below DBR 17.3 (DBR 15.4 and 16.4, conf on or off) with "this runtime does not push filters to Python data sources"; `auto` and `false` read correctly |
+| same | DBR 17.3 (dedicated and standard access mode) | pushes: a 1% filter costs 15.3 RU (`auto`: 13.3) against 438.9 for a Spark-side filter; the same rows as before; unchanged in RC5, where `true` with no filter at all also reads every row |
+| `filter_pushdown=true` / `auto` | serverless 4 / 5 | `true` fails with `DATA_SOURCE_PUSHDOWN_DISABLED` (the conf cannot be set); `auto` reads all rows without pushdown |
+| `read_many` with repeated and missing identities | serverless 4, DBR 17.3 | one row per existing document (900 for 950 distinct identities; earlier builds returned repeats); RU 338.6 against 324.9 before (+4%): after de-duplication the identities land in one partition and are read in one 950-item request, and the RU of a request grows faster than its size (0.354 RU per item at 950, 0.30 at about 240); with 4 tasks the same read costs 285.6 RU. Unchanged for 1.0.0; a container with several physical partitions was not measured |
+| `read_many` on a container partitioned on `/id` (`id_column == pk_column`) | serverless 4, OSS PySpark 4.2 | failed in RC3 (`DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT`, also in all earlier builds); **fixed in RC4** (serverless 4 and DBR 17.3: one row per existing id) |
+| malformed `client_certificate` | serverless 4 | raises `CosmosAuthError` naming `client_certificate`, without certificate text (RC3) |
+| typed batch read, LatestVersion AvailableNow stream, managed identity (serverless job) | serverless 4 / 5, DBR 17.3 | pass |
 
 ## 12. Defects found, and their status in 1.0.0
 
@@ -269,10 +290,12 @@ without a schema. 1.0.0 accepts and ignores these keys.
 | final round, 0.4.0.dev1 | High | a change-feed batch read with nothing to read failed with `AttributeError` on PySpark 4.2, DBR 18+ and serverless (the engine passes `InputPartition(None)`) | fixed |
 | final round, 0.4.0.dev1 | High | the default batch read failed on DBR 15.4 LTS (its worker takes each Arrow record batch for one row) | fixed: Arrow off on DBR 15.x, `arrow_batches=true` raises with guidance |
 | RC1 | Blocker | every batch read with `.schema(...)` failed: the strict option parser rejected the option Databricks adds | fixed in 1.0.0 (RC2) |
-| RC2 | Low | on DBR 15.4 and 16.4 `filter_pushdown=true` is accepted and does nothing (correct rows, full scan; DBR 16.4 defines `pushFilters` but never calls it) | fixed in 1.0.0: `filter_pushdown=true` fails with `CosmosConfigError` on runtimes that do not push filters (OSS PySpark 4.0, DBR 15.4 and 16.4); PySpark 4.1+, DBR 17.3 and serverless keep their behaviour |
+| RC2, RC3 | Low | `filter_pushdown=true` accepted but not applied (correct rows, full scan): on DBR 15.4 (RC2), and on DBR 16.4 with the conf on (RC3; DBR 16.4 defines `pushFilters` but never calls it) | fixed in 1.0.0: `filter_pushdown=true` fails with `CosmosConfigError` on runtimes that do not push filters (OSS PySpark 4.0, DBR 15.4 from RC3, DBR 16.4 from RC5); PySpark 4.1+, DBR 17.3 and serverless keep their behaviour |
+| RC3 | High (containers partitioned on `/id`) | `read_many` with the same column as id and partition key failed with `DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT` (present since `read_many` was added) | fixed in 1.0.0 (RC4) |
 | final round | Low | a malformed `client_certificate` surfaces as a raw `ValueError` that does not name the option | fixed in 1.0.0: `CosmosAuthError` that names `client_certificate` (and `client_certificate_password` when set), with the cause chained and no secret in the message |
 | final round | Low | `read_many` returns a repeated identity once per occurrence when the repeats fall into different Arrow batches | fixed in 1.0.0: repeated identities are removed before reading |
 | final round | Low | `log_metrics` reports no request charge for `read_many` | fixed in 1.0.0: every task logs its identities, the documents found and their request charge |
+| RC3 | Low | on one physical partition, the de-duplicated identities of a task are read in one large request, and the RU of a request grows faster than its size: 0.354 RU per identity at 950, 0.30 at about 240 (4% more RU than before on the test input) | measured, unchanged in 1.0.0: the de-duplication is correct, and at benchmark scale the RU equals the connector's |
 | benchmark, final round | Medium | with the default 5,000-item pages, reads limited by RU/s are about 30% slower than with 1,000-item pages | documented in 1.0.0: use `page_size=1000` for reads limited by RU/s |
 | final round | Low | the "one `load()` per filtered query" caveat of Spark 4.1-4.3 is real and silent (a reused DataFrame returned 39 of 3,000 rows) | documented in 1.0.0, as a warning in the README |
 
