@@ -93,8 +93,10 @@ def read_many(
                 yield from record_batches(iter(rows), out_schema, len(rows))
         log_metrics(opts, "read_many", started, items=requested, found=found, request_charge=charge)
 
-    # Deduplicated across the whole input, so each document is read, and returned, once.
-    wanted = identities.select(identities[id_column], identities[pk_column]).dropDuplicates()
+    # Fixed names: id_column and pk_column may be the same column (a container partitioned on /id), and the
+    # Arrow batches of mapInArrow cannot hold two fields of one name. Deduplicated, so each document is
+    # read, and returned, once.
+    wanted = identities.select(identities[id_column].alias("id"), identities[pk_column].alias("pk")).dropDuplicates()
     return wanted.mapInArrow(read, out_schema)
 
 

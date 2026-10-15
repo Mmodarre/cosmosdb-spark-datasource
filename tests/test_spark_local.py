@@ -260,3 +260,19 @@ def test_typed_reads_with_the_option_spark_connect_adds(spark) -> None:
         .load()
     )
     assert sorted(r.v for r in typed.collect()) == list(range(10, 40))
+
+
+def test_read_many_with_the_same_column_for_id_and_partition_key(spark) -> None:
+    from cosmosdb_datasource import read_many
+
+    store = FakeCosmosStore("spark_read_many_by_id", pk_paths=("/id",), partitions=2).register()
+    for i in range(10):
+        store.upsert({"id": f"d{i}", "v": i})
+    wanted = spark.createDataFrame([("d1",), ("d1",), ("d2",), ("missing",), (None,)], "id string")
+    options = {k: v for k, v in fake_options(store).items() if k != "container"}
+    rows = read_many(wanted, id_column="id", pk_column="id", container=store.name, **options).collect()
+    assert sorted((r.id, r.pk) for r in rows) == [("d1", "d1"), ("d2", "d2")]
+    typed = read_many(
+        wanted, id_column="id", pk_column="id", schema="id STRING, v BIGINT", container=store.name, **options
+    )
+    assert sorted(tuple(r) for r in typed.collect()) == [("d1", 1), ("d2", 2)]

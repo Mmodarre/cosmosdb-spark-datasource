@@ -140,9 +140,16 @@ def test_read_many_function_reads_identity_batches(make_store, caplog: pytest.Lo
     load(store)
     captured = {}
 
+    class Column:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def alias(self, alias: str) -> str:
+            return f"{self.name} AS {alias}"
+
     class Frame:
-        def __getitem__(self, name: str) -> str:
-            return name
+        def __getitem__(self, name: str) -> Column:
+            return Column(name)
 
         def select(self, *columns: str) -> Frame:
             captured["columns"] = columns
@@ -166,7 +173,7 @@ def test_read_many_function_reads_identity_batches(make_store, caplog: pytest.Lo
         )
         == "frame"
     )
-    assert captured["columns"] == ("doc", "key") and captured["deduplicated"]
+    assert captured["columns"] == ("doc AS id", "key AS pk") and captured["deduplicated"]
     batch = pa.RecordBatch.from_pydict({"doc": ["d1", "d7", "nope", None], "key": ["p1", "p1", "p1", "p1"]})
     with caplog.at_level(logging.DEBUG, logger="cosmosdb_datasource"):
         out = list(captured["fn"](iter([batch])))
