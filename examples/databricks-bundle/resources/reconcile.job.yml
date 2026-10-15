@@ -19,8 +19,10 @@ resources:
       tasks:
         - task_key: reconcile
           environment_key: datasource
-          # A failed reconcile is a result, not a transient error.
+          # A failed reconcile is a result, not a transient error. Serverless retries failed tasks
+          # even with max_retries: 0 unless auto-optimization is disabled.
           max_retries: 0
+          disable_auto_optimization: true
           spark_python_task:
             python_file: ../src/ops/reconcile.py
             parameters:
