@@ -14,11 +14,16 @@ uv sync                      # .venv with the package (editable) and the dev dep
 uvx pre-commit install       # optional: ruff on every commit
 ```
 
-The `dev` group contains PySpark, pyarrow, azure-identity, pytest, pytest-cov, mypy and ruff.
+The `dev` group contains PySpark, pyarrow, pandas (for `read_many`'s `mapInArrow`), azure-identity,
+pytest, pytest-cov, mypy and ruff.
 PySpark is not a runtime dependency of the package (Spark runtimes provide it).
 
-`uv.lock` is committed. After changing dependencies in `pyproject.toml`, run `uv lock` and commit
-the lockfile; CI fails if it is out of date.
+`uv.lock` is committed. After changing dependencies in `pyproject.toml`, run `uv lock` with the uv
+version of the workflows (`UV_VERSION`) and commit the lockfile; CI fails if it is out of date, or
+if it takes a package from anywhere other than `https://pypi.org/simple` and
+`https://files.pythonhosted.org` (`.github/scripts/check_lock_sources.py`). Behind a private index
+mirror, `uv lock` writes the mirror's URLs: rewrite them to those two hosts before committing (the
+files and hashes are the same).
 
 ## Checks
 
@@ -129,8 +134,10 @@ COSMOS_ENDPOINT=https://<account>.documents.azure.com:443/ COSMOS_KEY=<key> \
 ### In CI
 
 [`integration.yml`](.github/workflows/integration.yml) runs both emulators (pinned images) on
-pull requests, nightly and on demand, and fails if a test is skipped for any reason other than a
-capability the emulator lacks. The account job runs nightly and on demand when the repository has
+pull requests, nightly and on demand, each with azure-cosmos 4.14.0 (the lowest version
+`pyproject.toml` allows) and with the latest 4.x, and fails if a test is skipped for any reason
+other than a capability the emulator lacks. The jobs `Emulator (vnext)` and `Emulator (legacy)`,
+which `main` requires, pass when every leg of their emulator passed. The account job runs nightly and on demand when the repository has
 the secrets `COSMOS_ENDPOINT` and `COSMOS_KEY`; the repository variables `COSMOS_DATABASE`,
 `COSMOS_MULTI_PARTITION_THROUGHPUT` and `COSMOS_UNSUPPORTED` configure it.
 

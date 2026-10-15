@@ -27,6 +27,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # Keep within the uv_build bound of pyproject.toml's [build-system], like ci.yml.
   UV_VERSION: "0.13.1"
   # Linux vNext emulator: tag vnext-EN20261008 (vnext-latest on 2026-10-08), multi-arch index.
   VNEXT_IMAGE: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-EN20261008@sha256:4535ddbd27bba762f3e068f7585feb0022a2559ceccc9394b23aa38d91d77c38

@@ -14,6 +14,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # Keep within the uv_build bound of pyproject.toml's [build-system], so builds use uv's built-in backend.
   UV_VERSION: "0.13.1"
   TWINE_VERSION: "7.0.0"
   FORCE_COLOR: "1"
@@ -32,6 +33,8 @@ jobs:
           version: ${{ env.UV_VERSION }}
           python-version: "3.12"
           enable-cache: true
+      - name: Check that uv.lock takes packages only from PyPI
+        run: uv run --no-project python .github/scripts/check_lock_sources.py uv.lock
       - name: Check that uv.lock is up to date
         run: uv lock --check
       - name: ruff check
@@ -180,6 +183,7 @@ jobs:
           disable_search: true
           plugins: noop
           use_oidc: true
+          version: v11.3.1 # the Codecov CLI; the action downloads "latest" otherwise
           fail_ci_if_error: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Upload the coverage report
         if: ${{ !cancelled() }}
