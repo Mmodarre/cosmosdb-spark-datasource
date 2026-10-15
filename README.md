@@ -41,8 +41,8 @@ optionally `azure-identity`), which serverless environments and pipelines can in
 - **Typed reads**: a user-specified schema is filled from the documents with safe conversions, in
   `PERMISSIVE`, `DROPMALFORMED` or `FAILFAST` mode.
 - Rows are streamed page by page. Query reads fetch the next page ahead (`prefetch_pages`;
-  change-feed pages are fetched on demand), and batch reads and `read_many` hand rows to Spark as
-  Arrow record batches where the runtime takes them (see `arrow_batches`). One client is reused
+  change-feed pages are fetched on demand), and batch reads of documents and `read_many` hand rows
+  to Spark as Arrow record batches where the runtime takes them (see `arrow_batches`). One client is reused
   per Python worker, retries back off with jitter and honour `x-ms-retry-after-ms`, and
   per-partition metrics (rows, RU, duration) and slow requests can be logged.
 
@@ -63,9 +63,9 @@ Databricks runtimes built on Spark 3.5 from DBR 15.4 LTS (and serverless environ
 include the streaming Python data source API; DBR 14.3 LTS and serverless environment 1 include
 only the batch API, and importing the package there fails with an `ImportError` that names the
 supported runtimes. Python 3.10 is therefore not usable on Databricks: only those two runtimes
-have it. Batch reads hand rows to Spark as Arrow record batches on PySpark 4.0 and later and on
-DBR 16.4 LTS and later; on DBR 15.4 LTS, whose read worker does not take them, and on serverless
-compute, they hand over tuples (`arrow_batches`).
+have it. Batch reads of documents hand rows to Spark as Arrow record batches on PySpark 4.0 and
+later and on DBR 16.4 LTS and later; on DBR 15.4 LTS, whose read worker does not take them, and by
+default on serverless compute, they hand over tuples (`arrow_batches`).
 
 The manual runs on Databricks used pre-release builds; the changes made after commit 59c8bd1 are
 covered by CI only.
@@ -200,13 +200,16 @@ own session.
 
 ## Options
 
-Option names are case-insensitive. An unknown option fails the read with `CosmosConfigError`,
+Option names are case-insensitive. An unknown option fails `load()` with `CosmosConfigError`,
 which names the closest known option (`initial_snapshots` gives "did you mean
-'initial_snapshot'?"); `path` and `paths`, which Spark adds for `.load(path)`, are ignored. So
-does an option that the read would accept without using it:
+'initial_snapshot'?"); `path` and `paths`, which Spark adds for `.load(path)`, are ignored. An
+option that the read would accept without using it fails with `CosmosConfigError` as well, at
+`load()` or when Spark plans the read:
 
 - `query_parameters` without `query` or `sampling_query`; `slow_request_log_per_minute` without
-  `slow_request_ms`;
+  `slow_request_ms` above 0; `sampling_size`, `sampling_query`, `infer_system_properties` and
+  `infer_timestamp` without `infer_schema=true`; `snapshot_interval_seconds` without
+  `snapshot_stream=true`;
 - credential options of another `auth_type` (for example `client_secret` with `auth_type=key`),
   and `client_certificate_password` without `client_certificate`;
 - `change_feed_end_wait_seconds` on reads of documents;
@@ -247,11 +250,11 @@ does an option that the read would accept without using it:
 
 | Option | Default | Description |
 |---|---|---|
-| `query` | `SELECT * FROM c` | Query run **per input partition**, for server-side filters and projections. `ORDER BY`, `GROUP BY`, `DISTINCT`, `TOP`, `OFFSET` and aggregates apply per partition, not globally; do them in Spark. |
+| `query` | `SELECT * FROM c` | Query run **per input partition**, for server-side filters and projections. `ORDER BY`, `GROUP BY`, `DISTINCT`, `TOP`, `OFFSET` and aggregates apply per partition, not globally (a WARNING says so): do them in Spark, or combine the per-partition results there, for example by summing the rows of `SELECT COUNT(1) AS n FROM c`. |
 | `query_parameters` | | JSON list of `{"name": "@p", "value": ...}` |
 | `page_size` | `5000` | Maximum items per request (the service also caps a page at about 4 MB). Pages of 5,000 cost about 7% fewer RU per document than pages of 1,000. |
 | `prefetch_pages` | `1` | Query pages fetched ahead, on one thread per task, while the current page is converted; `0` fetches on demand; at most `4` |
-| `arrow_batches` | `auto` | Hand rows to Spark as Arrow record batches, built per page. `auto`: on PySpark 4.0 or later and on Databricks Runtime 16.4 LTS or later (classic compute), not on DBR 15.4 LTS, whose read worker takes each batch for one row (`true` is rejected there), and not on serverless compute, where the engine's batch layout is not verified |
+| `arrow_batches` | `auto` | Hand rows to Spark as Arrow record batches of up to `page_size` rows. `auto`: on PySpark 4.0 or later and on Databricks Runtime 16.4 LTS or later (classic compute), not on DBR 15.4 LTS, whose read worker takes each batch for one row (`true` is rejected there), and not on serverless compute, where the engine's batch layout is not verified |
 | `partitions_per_feed_range` | `1` | Split every physical partition into N EPK sub-ranges, for N times more tasks. Each sub-range query scans its whole physical partition, so a full read costs about N times the RU of `1` (see [Sizing and performance](#sizing-and-performance)). N is 1 to 1024. `auto` lets the data source choose; it reads one task per physical partition, the same as `1`. |
 | `mode` | `PERMISSIVE` | Conversion errors: `PERMISSIVE` (null, plus the corrupt-record column), `DROPMALFORMED` or `FAILFAST` |
 | `raw_json_column` | `body` | Name of the column holding the whole document |
@@ -488,11 +491,17 @@ schema = """id STRING, customerId STRING, seq BIGINT, createdAt TIMESTAMP,
 df = spark.read.format("cosmosdb").schema(schema).options(**conn, container="orders").load()
 ```
 
-Conversions never guess: a value of the wrong kind (a string that is not a number for BIGINT, a
-fraction for an integer type, an integer out of range) is a conversion failure, handled as `mode`
-says. Four conversions are lossy by design and do not fail, also under `FAILFAST`: DECIMAL rounds
-half-up to its scale, TIMESTAMP keeps microseconds (a seventh fraction digit is dropped), DOUBLE
-holds integers above 2^53 only approximately, and FLOAT narrows a number to single precision.
+A value of the wrong kind (a string that is not a number for BIGINT, a fraction for an integer
+type, an integer out of range) is a conversion failure, handled as `mode` says. Some conversions
+lose information by design and do not fail, also under `FAILFAST`:
+
+- DECIMAL rounds half-up to its scale;
+- TIMESTAMP and TIMESTAMP_NTZ keep microseconds: fraction digits after the sixth are dropped, and
+  epoch numbers are rounded to microseconds;
+- TIMESTAMP_NTZ drops the UTC offset (it keeps the wall-clock time), and DATE drops the time of day;
+- DOUBLE holds integers above 2^53 only approximately, and FLOAT narrows a number to single
+  precision;
+- the unit of an epoch number (seconds, milliseconds or microseconds) is chosen by its magnitude.
 
 | Spark type | Accepted JSON values |
 |---|---|
@@ -684,6 +693,8 @@ while True:
   `_ts` and `crts` do not order versions that share an LSN, and on multi-region-write accounts `_ts`
   can be older than the conflict resolution it survived (see
   [docs/MODES.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/docs/MODES.md#ordering-sequence_by)).
+  Changing the `sequence_by` of an existing AUTO CDC target fails with
+  `DATATYPE_MISMATCH ... __DeleteVersion` until the target is fully refreshed.
 - **Deletes** (`AllVersionsAndDeletes`): `apply_as_deletes = expr("operation = 'delete'")`.
 
 ### Initial snapshot

@@ -373,8 +373,6 @@ def test_partition_key_is_read_only_for_pk_filters(make_store, no_sleep) -> None
     assert list(reader.pushFilters([EqualTo(("pk",), "p1")])) == []
 
 
-# ----------------------------------------------------------------------------- equivalence with Spark
-
 STRINGS = ["a", "ab", "b", "B", "", "5", "true", "null", "é", "\ue000x", "x\U0001f600"]
 NUMBERS = [-1, 0, 2, 3, 2.0, 2.5, 1e20, 2**60]
 DOUBLES = [-0.0, 0.0, 1.5, 2.0, 2, 1e20]

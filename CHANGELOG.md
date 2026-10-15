@@ -15,8 +15,8 @@ First public release.
 
 - Batch reads with `spark.read.format("cosmosdb")`: one Spark partition per physical partition
   (feed range), optional EPK sub-splitting (`partitions_per_feed_range`), and a server-side `query`
-  with `query_parameters`, run per partition. Each `(pk, id)` is returned at most once per read,
-  also when a partition splits during the read.
+  with `query_parameters`, run per partition. Each `(pk, id)` is returned at most once per read of
+  a query that returns `id`, also when a partition splits during the read.
 - Typed reads: user-specified schemas with documented conversions in `PERMISSIVE`, `DROPMALFORMED`
   or `FAILFAST` mode, and schema inference from a sample (`infer_schema`, `sampling_size`,
   `sampling_query`).
@@ -24,8 +24,8 @@ First public release.
   `spark.sql.python.filterPushdown.enabled=true`): Spark's filters become parameterized `WHERE`
   predicates of the query, and Spark re-applies every filter the service cannot evaluate exactly.
 - Logical-partition and point reads: `partition_key`, `item_ids`, and `read_many(identities)` for a
-  DataFrame of `(id, pk)` rows; pushed `pk = 'v'` and `pk IN (...)` filters read only those logical
-  partitions.
+  DataFrame of `(id, pk)` rows; pushed `pk = 'v'` and `pk IN (...)` filters with string keys on a
+  non-hierarchical partition key read only those logical partitions.
 - Change-feed streams with `spark.readStream.format("cosmosdb")` in `LatestVersion` and
   `AllVersionsAndDeletes` mode: micro-batches bounded by LSN per range, so a retried or replayed
   batch reads the same changes; `lsn_seq` to order the changes of a document that share an LSN;
@@ -50,8 +50,9 @@ First public release.
   per-partition metrics (`log_metrics`) and sampled slow-request logs (`slow_request_ms`).
 - Read performance: query pages fetched ahead (`prefetch_pages`), Arrow record batches
   (`arrow_batches`) and 5,000-item pages.
-- Option validation when a read is loaded: an unknown option, or one the read would accept without
-  using it, fails with `CosmosConfigError`, which names the closest known option.
+- Option validation: an unknown option fails at `load()` with `CosmosConfigError`, naming the
+  closest known option; an option that the read would accept without using it fails at `load()` or
+  when the read is planned.
 - Runtimes: PySpark 4.0, 4.1 and 4.2 on Python 3.10 to 3.13; Databricks Runtime 15.4 LTS and later
   (dedicated and standard access mode), serverless environment version 2 and later, and Lakeflow
   Spark Declarative Pipelines; `azure-cosmos` 4.14.0 to the latest 4.x.
@@ -71,7 +72,8 @@ First public release.
   are not pushed.
 - Unity Catalog service credentials work only through a token minted on the driver
   (`auth_type=access_token`), which is not refreshed.
-- Arrow record batches are not used on Databricks Runtime 15.4 LTS or on serverless compute.
+- Arrow record batches are not used on Databricks Runtime 15.4 LTS, and not by default on
+  serverless compute.
 - No global throughput control across reads or jobs; Gateway mode only; partition merges have not
   been tested.
 
