@@ -168,6 +168,21 @@ def engine_loaded() -> bool:
     return ENGINE_PACKAGE in sys.modules
 
 
+def filter_pushdown_supported() -> bool | None:
+    """Return whether the PySpark that runs the reader has the filter pushdown API; None if it cannot tell.
+
+    Spark only pushes filters to a reader through ``DataSourceReader.pushFilters``: PySpark 4.1 and later
+    have it, and so does Databricks Runtime 17.3 LTS through a back-port, while OSS PySpark 4.0 and DBR
+    15.4 LTS do not. Absent means known unsupported; a module that cannot be inspected means unknown.
+    """
+    name = f"{ENGINE_PACKAGE}.sql.datasource" if engine_loaded() else "pyspark.sql.datasource"
+    try:
+        reader = getattr(importlib.import_module(name), "DataSourceReader", None)
+    except ImportError:
+        return None
+    return hasattr(reader, "pushFilters") if isinstance(reader, type) else None
+
+
 # The read worker accepts pyarrow.RecordBatch from read() from PySpark 4.0 (SPARK-48493), and on
 # Databricks Runtime 16.4 LTS, whose PySpark is 3.5.2. On DBR 15.4 LTS (PySpark 3.5.0) it takes each
 # batch for one row and fails with DATA_SOURCE_RETURN_SCHEMA_MISMATCH.

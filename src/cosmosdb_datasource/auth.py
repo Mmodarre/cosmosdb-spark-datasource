@@ -93,12 +93,24 @@ def build_token_credential(auth: AuthOptions) -> Any:
         identity = _identity_module()
         if auth.client_certificate:
             assert auth.tenant_id is not None and auth.client_id is not None
-            return identity.CertificateCredential(
-                tenant_id=auth.tenant_id,
-                client_id=auth.client_id,
-                certificate_data=base64.b64decode(auth.client_certificate),
-                password=auth.client_certificate_password,
-            )
+            try:
+                return identity.CertificateCredential(
+                    tenant_id=auth.tenant_id,
+                    client_id=auth.client_id,
+                    certificate_data=base64.b64decode(auth.client_certificate, validate=True),
+                    password=auth.client_certificate_password,
+                )
+            except (ValueError, TypeError) as exc:  # binascii.Error is a ValueError
+                # Chained rather than quoted, so the message names only the options.
+                which = (
+                    "Option 'client_certificate' with 'client_certificate_password'"
+                    if auth.client_certificate_password
+                    else "Option 'client_certificate'"
+                )
+                raise CosmosAuthError(
+                    f"{which} could not be loaded as a certificate with its private key ({type(exc).__name__}): "
+                    "it must be the base64 encoding of a PEM or PKCS#12 file, and the password must open it."
+                ) from exc
         return identity.ClientSecretCredential(
             tenant_id=auth.tenant_id, client_id=auth.client_id, client_secret=auth.client_secret
         )

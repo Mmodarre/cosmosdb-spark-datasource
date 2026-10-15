@@ -141,14 +141,19 @@ def test_filter_pushdown_matches_spark_filtering(spark) -> None:
         options = fake_options(store, filter_pushdown=pushdown)
         return spark.read.format("cosmosdb").schema(SCHEMA).options(**options).load()
 
+    supported = _filter_pushdown_supported()
     try:
         for expr in PUSHDOWN_EXPRESSIONS:
             spark.conf.set(conf, "false")
             expected = sorted(map(repr, load("auto").filter(expr).collect()))
             spark.conf.set(conf, "true")
-            assert sorted(map(repr, load("true").filter(expr).collect())) == expected, expr
+            if supported:
+                assert sorted(map(repr, load("true").filter(expr).collect())) == expected, expr
             assert sorted(map(repr, load("auto").filter(expr).collect())) == expected, expr
-        if _filter_pushdown_supported():
+        if not supported:  # PySpark 4.0: Spark would never call pushFilters
+            with pytest.raises(Exception, match="filter_pushdown=true needs"):
+                load("true").collect()
+        if supported:
             plan = load("auto").filter("id = 'd005' AND s = 'a'")._jdf.queryExecution().executedPlan().toString()
             (spark_filter,) = [line for line in plan.splitlines() if " Filter (" in line]
             assert "s#" in spark_filter and "id#" not in spark_filter, plan  # id is exact, s is re-checked
@@ -235,11 +240,11 @@ def test_read_many(spark) -> None:
     )
     options = {k: v for k, v in fake_options(store).items() if k != "container"}
     rows = read_many(wanted, pk_column="key", container=store.name, **options).collect()
-    assert sorted(r.id for r in rows) == ["d1", "d2", "d2"]  # repeated identities: once per Arrow batch
+    assert sorted(r.id for r in rows) == ["d1", "d2"]  # a repeated identity is read once
     assert {r.pk for r in rows} == {"p1", "p2"} and rows[0].body.startswith("{")
     typed = read_many(wanted, pk_column="key", schema="id STRING, v BIGINT", container=store.name, **options)
     assert typed.schema.simpleString() == "struct<id:string,v:bigint>"
-    assert sorted(tuple(r) for r in typed.distinct().collect()) == [("d1", 1), ("d2", 2)]
+    assert sorted(tuple(r) for r in typed.collect()) == [("d1", 1), ("d2", 2)]
 
 
 def test_typed_reads_with_the_option_spark_connect_adds(spark) -> None:

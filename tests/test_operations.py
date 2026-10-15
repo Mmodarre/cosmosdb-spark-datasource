@@ -13,7 +13,7 @@ import pytest
 from cosmosdb_datasource import auth
 from cosmosdb_datasource.backend import SdkBackend
 from cosmosdb_datasource.diagnostics import SlowRequestLog
-from cosmosdb_datasource.errors import CosmosConfigError
+from cosmosdb_datasource.errors import CosmosAuthError, CosmosConfigError
 from cosmosdb_datasource.options import parse_options
 from tests.test_read_performance import FakeContainer
 
@@ -83,6 +83,21 @@ def test_a_line_wrapped_certificate_is_accepted() -> None:
     opts = parse_options({**BASE, "tenant_id": "t", "client_id": "c", "client_certificate": f"  {wrapped}"})
     assert opts.auth.client_certificate == encoded
     assert isinstance(auth.build_token_credential(opts.auth), CertificateCredential)
+
+
+@pytest.mark.parametrize("password", [None, "pw"])
+def test_a_certificate_that_cannot_be_loaded_names_the_option(password: str | None) -> None:
+    pytest.importorskip("azure.identity")
+
+    not_a_certificate = base64.b64encode(b"-----BEGIN NOTHING-----\nsecret-material\n").decode()
+    extra = {"client_certificate_password": password} if password else {}
+    opts = parse_options({**BASE, "tenant_id": "t", "client_id": "c", "client_certificate": not_a_certificate, **extra})
+    with pytest.raises(CosmosAuthError, match="Option 'client_certificate'") as raised:
+        auth.build_token_credential(opts.auth)
+    message = str(raised.value)
+    assert ("client_certificate_password" in message) == bool(password)
+    assert not_a_certificate not in message and "secret-material" not in message and "pw" not in message
+    assert isinstance(raised.value.__cause__, ValueError)
 
 
 def test_certificate_rotation_builds_a_new_driver_credential(monkeypatch: pytest.MonkeyPatch) -> None:

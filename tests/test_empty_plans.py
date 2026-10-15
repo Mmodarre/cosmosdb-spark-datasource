@@ -73,7 +73,7 @@ def test_idle_latest_version_read_after_catching_up(make_store, tmp_path) -> Non
     assert rows == [] and isinstance(parts[0], CosmosEmptyPartition)
 
 
-def test_pushed_partition_keys_that_exclude_each_other_plan_the_empty_partition(make_store) -> None:
+def test_pushed_partition_keys_that_exclude_each_other_plan_the_empty_partition(make_store, pushdown_api) -> None:
     from tests.test_pushdown import EqualTo  # Spark's filter classes, also on PySpark 4.0
 
     store = make_store(partitions=2)
@@ -97,7 +97,7 @@ def test_pushed_partition_keys_that_exclude_each_other_plan_the_empty_partition(
     ],
     ids=["batch", "pushdown", "item-ids", "change-feed-batch"],
 )
-def test_batch_readers_read_nothing_for_an_empty_plan(make_store, substitute, extra) -> None:
+def test_batch_readers_read_nothing_for_an_empty_plan(make_store, substitute, extra, pushdown_api) -> None:
     store = make_store()
     write(store, 0, 5)
     reader, _parts = plan(fake_options(store, **extra))
