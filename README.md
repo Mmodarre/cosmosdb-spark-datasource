@@ -190,7 +190,7 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 
 | Option | Default | Description |
 |---|---|---|
-| `endpoint` | required | Account URI, `https://<account>.documents.azure.com:443/` |
+| `endpoint` | required | Account URI, `https://<account>.documents.azure.com:443/`. `http://` only for an emulator: `localhost`, a loopback address or a host name without a domain (a container on a local network). |
 | `database` | required | Database name |
 | `container` | required | Container name |
 | `auth_type` | inferred | `key`, `service_principal`, `access_token` or `default`. Inferred when exactly one credential option is set; `default` must be explicit. `service_credential` is rejected, see [Authentication](#authentication). |
@@ -205,6 +205,8 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `target_ru_per_second` | | RU budget of one read (or one micro-batch): every task waits after a page as long as needed to keep the read at or below it. See [Throughput control](#throughput-control). |
 | `connection_timeout_seconds` | SDK default | HTTP request timeout |
 | `read_timeout_seconds` | SDK default | Socket read timeout |
+| `tls_ca_bundle` | system CAs | Path of a PEM file with the CA certificates to verify the endpoint with, e.g. behind a TLS-inspecting proxy or for an emulator certificate; the file must exist on every Spark node |
+| `tls_verify` | `true` | `false` turns certificate verification off (a WARNING is logged). azure-cosmos does not verify `localhost` and `127.0.0.1` anyway. |
 | `throttle_max_retries` | `9` | SDK retries on HTTP 429; `0` disables them, so 429s go straight to the retry layer of `max_retries` |
 | `throttle_max_wait_seconds` | `60` | Cumulative SDK wait on 429 per request; `0` disables the SDK's 429 retries as well |
 | `max_retries` | `8` | Retries after the SDK gives up (408, 410, 429, 449, 5xx, 404 with sub-status 1002, network errors). Reads resume from the last completed page. The driver's metadata requests use the same policy. |

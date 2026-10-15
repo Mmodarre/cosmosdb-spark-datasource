@@ -30,6 +30,9 @@ First public release.
   default 1), rows reach Spark as Arrow record batches (`arrow_batches`, default `auto`), and row
   conversion and the encoding of `body` take fewer calls. A client-bound read of 1M documents on
   DBR 17.3 went from 131,000 to 190,000 rows/s (raw) and from 109,000 to 170,000 rows/s (typed).
+- `tls_ca_bundle` and `tls_verify` options for the TLS verification of the endpoint, and `http://`
+  endpoints for emulators on the local machine or network (loopback addresses, `localhost`, host
+  names without a domain).
 - Schema inference for batch reads (`infer_schema=true`): up to `sampling_size` (1000) documents of
   `sampling_query` (default: `query`), spread over the physical partitions, give typed columns.
   Types merge to the tightest common type (else STRING); `infer_system_properties` and
