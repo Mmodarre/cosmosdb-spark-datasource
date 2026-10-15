@@ -280,7 +280,7 @@ class CosmosSnapshotStreamReader(CosmosReaderBase, DataSourceStreamReader, _Avai
         return str(props["_rid"])
 
     def _session_tokens(self, backend: Any, ranges: list[tuple[str, str]]) -> dict[tuple[str, str], str | None]:
-        # Sequential like the change feed's start probes; one cheap request per physical partition.
+        # One cheap request per physical partition, one after the other.
         def probe(rng: tuple[str, str]) -> tuple[int, str | None]:
             return self._driver_call(
                 f"probing the session token of range {epk.range_key(*rng)}",

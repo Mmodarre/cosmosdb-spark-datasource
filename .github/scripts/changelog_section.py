@@ -1,6 +1,6 @@
 """Print the CHANGELOG.md section of a version (Keep a Changelog format).
 
-For a pre-release (e.g. 0.3.0rc1) without its own section, the ``[Unreleased]`` section is used.
+For a pre-release (e.g. 1.1.0rc1) without its own section, the ``[Unreleased]`` section is used.
 Fails if the section is missing or empty.
 
 Usage: python .github/scripts/changelog_section.py VERSION [CHANGELOG.md]

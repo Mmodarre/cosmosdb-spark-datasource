@@ -20,9 +20,11 @@ repository, and only those two jobs get the `id-token: write` permission.
 
 ## Versions
 
-Versions follow [PEP 440](https://peps.python.org/pep-0440/). A version with a pre-release suffix
-(`0.3.0rc1`, `0.3.0b2`, `0.3.0.dev1`) is published as a GitHub pre-release; pip only installs it
-when asked for explicitly (`pip install --pre` or `==0.3.0rc1`).
+Versions follow [PEP 440](https://peps.python.org/pep-0440/) and, from 1.0.0, Semantic Versioning
+for the public API (README, "Versioning"): a release that removes or changes an option, a column or
+a checkpoint format is a major release. A version with a pre-release suffix (`1.1.0rc1`, `1.1.0b2`,
+`1.1.0.dev1`) is published as a GitHub pre-release; pip only installs it when asked for explicitly
+(`pip install --pre` or `==1.1.0rc1`).
 
 The version is defined once, as `version` in `pyproject.toml`. `cosmosdb_datasource.__version__`
 reads it from the installed distribution's metadata.

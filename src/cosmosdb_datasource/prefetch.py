@@ -1,7 +1,7 @@
 """Read ahead of a page iterator on a background thread.
 
-A task spends a large share of its time waiting for the next page (about 30% in the benchmark, one task
-per physical partition). Fetching page N+1 while page N is converted overlaps that wait: the request
+A task with one physical partition to read spends a large share of its time waiting for the next page.
+Fetching page N+1 while page N is converted overlaps that wait: the request
 releases the GIL while it waits on the socket. The fetch thread owns the source iterator, so the SDK pager
 is still driven from one thread at a time, and pages (or the error that ended the source) reach the
 consumer in source order, so a caller resuming from the continuation of the last page it consumed sees

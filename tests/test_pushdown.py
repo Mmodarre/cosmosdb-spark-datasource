@@ -130,9 +130,6 @@ def pushdown_options(store, **extra: str) -> dict[str, str]:
     return fake_options(store, filter_pushdown="true", **extra)
 
 
-# --------------------------------------------------------------------------------------- query parsing
-
-
 @pytest.mark.parametrize(
     ("query", "parts"),
     [
@@ -174,9 +171,6 @@ def test_simple_queries_are_parsed(query: str, parts: tuple[str, str, str | None
 )
 def test_other_queries_are_not_combined(query: str) -> None:
     assert parse_simple_query(query) is None
-
-
-# --------------------------------------------------------------------------------------- translation
 
 
 def translator(pk: PartitionKeyInfo | None = None, reserved: tuple[str, ...] = ()) -> Translator:
@@ -287,9 +281,6 @@ def test_fake_where_semantics() -> None:
     assert returns('ARRAY_CONTAINS(@p, c["a"]["b"])', {"a": {"b": 2}}, {"@p": [1, 2]})
     assert returns("c.a IN ('x', 'y') AND STARTSWITH(c.a, 'y')", {"a": "yz"}) is False
     assert returns("c.a > 'B'", {"a": "a"})
-
-
-# --------------------------------------------------------------------------------------- the reader
 
 
 def test_reader_selection(make_store) -> None:

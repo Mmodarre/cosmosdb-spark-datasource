@@ -26,7 +26,7 @@ variables:
     description: >-
       pip requirement of the data source: a version from PyPI, or the path of a wheel in a Unity
       Catalog volume. Use ~= rather than < or > in pipeline dependencies.
-    default: cosmosdb-spark-datasource~=0.3.1
+    default: cosmosdb-spark-datasource~=1.0
 
   cosmos_database:
     description: Cosmos DB database (required)

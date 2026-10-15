@@ -3,7 +3,7 @@
 [![CI](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/workflows/ci.yml)
 [![Integration](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/workflows/integration.yml/badge.svg?branch=main)](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/workflows/integration.yml)
 [![Coverage](https://codecov.io/gh/Mmodarre/cosmosdb-spark-datasource/graph/badge.svg?branch=main)](https://codecov.io/gh/Mmodarre/cosmosdb-spark-datasource)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/LICENSE)
 
 A PySpark data source for **Azure Cosmos DB for NoSQL**, written in Python on the PySpark Python
 Data Source API (`pyspark.sql.datasource`). It reads containers in batch and streams their change
@@ -40,10 +40,11 @@ optionally `azure-identity`), which serverless environments and pipelines can in
   ([details](#throughput-control)).
 - **Typed reads**: a user-specified schema is filled from the documents with safe conversions, in
   `PERMISSIVE`, `DROPMALFORMED` or `FAILFAST` mode.
-- Rows are streamed page by page with the next page read ahead and handed to Spark as Arrow
-  batches, one client is reused per Python worker, retries back off with jitter and honour
-  `x-ms-retry-after-ms`, and per-partition metrics (rows, RU, duration) and slow requests can be
-  logged.
+- Rows are streamed page by page. Query reads fetch the next page ahead (`prefetch_pages`;
+  change-feed pages are fetched on demand), and batch reads and `read_many` hand rows to Spark as
+  Arrow record batches where the runtime takes them (see `arrow_batches`). One client is reused
+  per Python worker, retries back off with jitter and honour `x-ms-retry-after-ms`, and
+  per-partition metrics (rows, RU, duration) and slow requests can be logged.
 
 ## Compatibility
 
@@ -53,21 +54,26 @@ optionally `azure-identity`), which serverless environments and pipelines can in
 | Python | 3.10 to 3.13 | CI |
 | `azure-cosmos` | `>=4.14.0,<5` | CI: unit tests with the locked version, with 4.14.0 and with the latest 4.x; integration tests against both emulators with 4.14.0 and with the latest 4.x |
 | `azure-identity` (optional) | `>=1.19,<2` | unit tests only |
-| Databricks serverless | environment version 2 or later | manually: environments 2 to 5, jobs and notebooks, with 0.2.0; environment 4 with 0.3.1 (not in CI) |
-| Databricks classic compute | DBR 15.4 LTS or later | manually with 0.2.0: DBR 15.4, 16.4, 17.3 (dedicated and standard access mode), 18.3 and 19.x (not in CI) |
-| Lakeflow SDP | DBR 18.3, serverless and classic | manually, with 0.2.0 and 0.3.1 (not in CI) |
+| Databricks serverless | environment version 2 or later | manually, not in CI: environments 2 to 5, jobs and notebooks, with a pre-release build of 2026-10-14; environments 4 and 5 with commit 59c8bd1 |
+| Databricks classic compute | DBR 15.4 LTS or later | manually, not in CI: DBR 15.4, 16.4, 17.3 (dedicated and standard access mode), 18.3 and 19.x, with a pre-release build of 2026-10-14 and with commit 59c8bd1 |
+| Lakeflow SDP | DBR 18.3, serverless and classic | manually, not in CI, with pre-release builds of 2026-10-14 |
 | OSS Spark 3.x | | not supported: the Python Data Source API starts with Spark 4.0 |
 
 Databricks runtimes built on Spark 3.5 from DBR 15.4 LTS (and serverless environments 2 and 3)
 include the streaming Python data source API; DBR 14.3 LTS and serverless environment 1 include
 only the batch API, and importing the package there fails with an `ImportError` that names the
 supported runtimes. Python 3.10 is therefore not usable on Databricks: only those two runtimes
-have it.
+have it. Batch reads hand rows to Spark as Arrow record batches on PySpark 4.0 and later and on
+DBR 16.4 LTS and later; on DBR 15.4 LTS, whose read worker does not take them, and on serverless
+compute, they hand over tuples (`arrow_batches`).
+
+The manual runs on Databricks used pre-release builds; the changes made after commit 59c8bd1 are
+covered by CI only.
 
 The integration tests run against two Cosmos DB emulators in CI (see
-[CONTRIBUTING.md](CONTRIBUTING.md#integration-tests)). Neither emulator has `AllVersionsAndDeletes`
+[CONTRIBUTING.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/CONTRIBUTING.md#integration-tests)). Neither emulator has `AllVersionsAndDeletes`
 or Entra ID: those are covered by unit tests against a service fake and were run manually against
-Azure. Partition splits are covered by the fake in CI and were run manually against Azure (see
+Azure. Partition splits are covered by the fake in CI and were verified against Azure (see
 [Guarantees](#guarantees)).
 
 ## Installation
@@ -86,7 +92,7 @@ PySpark is not a dependency: the Spark runtime provides it.
 - **Databricks classic compute**: install it as a cluster library or with `%pip`.
 - **Lakeflow Spark Declarative Pipelines, serverless**: add it to the pipeline's
   `environment.dependencies`. Write version ranges with `~=` (e.g.
-  `cosmosdb-spark-datasource~=0.3.1`): on DBR 18.3 the dependency string `azure-identity>=1.19,<2`
+  `cosmosdb-spark-datasource~=1.0`): on DBR 18.3 the dependency string `azure-identity>=1.19,<2`
   failed to install (`ENVIRONMENT_PIP_INSTALL_ERROR`) while `azure-identity~=1.19` installed.
 - **Lakeflow Spark Declarative Pipelines, classic compute**: put
   `%pip install cosmosdb-spark-datasource azure-identity~=1.19` in the **first** cell of a notebook
@@ -222,7 +228,7 @@ does an option that the read would accept without using it:
 | `account_key` | | Account key (`auth_type=key`) |
 | `tenant_id`, `client_id`, `client_secret` | | Entra ID service principal (`auth_type=service_principal`) |
 | `client_certificate`, `client_certificate_password` | | Service principal with a certificate instead of `client_secret`: the base64 of a PEM (private key and certificate) or PKCS#12 file (line breaks, as `base64` and `openssl base64` write them, are ignored), and its password if it has one |
-| `access_token`, `access_token_expires_on` | | Pre-minted bearer token. Expiry in epoch seconds or ISO-8601; read from the JWT `exp` claim if omitted (`auth_type=access_token`). |
+| `access_token`, `access_token_expires_on` | | Pre-minted bearer token. Expiry in epoch seconds or ISO-8601; read from the JWT `exp` claim if omitted, and assumed to be one hour away (with a WARNING) if the token has no `exp` either (`auth_type=access_token`). |
 | `preferred_regions` | account default | Comma-separated read regions, e.g. `West Europe,North Europe` |
 | `consistency_level` | account default | `Strong`, `BoundedStaleness`, `Session`, `ConsistentPrefix` or `Eventual` (can only weaken the account level) |
 | `priority` | | `Low` or `High` ([priority-based execution](https://learn.microsoft.com/azure/cosmos-db/priority-based-execution)). `Low` lets OLTP traffic win under contention. |
@@ -234,7 +240,7 @@ does an option that the read would accept without using it:
 | `tls_verify` | `true` | `false` turns certificate verification off (a WARNING is logged). azure-cosmos does not verify `localhost` and `127.0.0.1` anyway. |
 | `throttle_max_retries` | `9` | SDK retries on HTTP 429; `0` disables them, so 429s go straight to the retry layer of `max_retries` |
 | `throttle_max_wait_seconds` | `60` | Cumulative SDK wait on 429 per request; `0` disables the SDK's 429 retries as well |
-| `max_retries` | `8` | Retries after the SDK gives up (408, 410, 429, 449, 5xx, 404 with sub-status 1002, network errors). Reads resume from the last completed page. The driver's metadata requests use the same policy. |
+| `max_retries` | `8` | Retries after the SDK gives up (408, 410, 429, 449, 500, 502, 503, 504, 404 with sub-status 1002, network errors). Reads resume from the last completed page. The driver's metadata requests use the same policy. |
 | `retry_max_backoff_seconds` | `60` | Cap of the exponential backoff (jittered; `x-ms-retry-after-ms` is honoured) |
 
 ### Batch reads
@@ -244,9 +250,9 @@ does an option that the read would accept without using it:
 | `query` | `SELECT * FROM c` | Query run **per input partition**, for server-side filters and projections. `ORDER BY`, `GROUP BY`, `DISTINCT`, `TOP`, `OFFSET` and aggregates apply per partition, not globally; do them in Spark. |
 | `query_parameters` | | JSON list of `{"name": "@p", "value": ...}` |
 | `page_size` | `5000` | Maximum items per request (the service also caps a page at about 4 MB). Pages of 5,000 cost about 7% fewer RU per document than pages of 1,000. |
-| `prefetch_pages` | `1` | Query pages fetched ahead, on one thread per task, while the current page is converted; `0` fetches on demand |
+| `prefetch_pages` | `1` | Query pages fetched ahead, on one thread per task, while the current page is converted; `0` fetches on demand; at most `4` |
 | `arrow_batches` | `auto` | Hand rows to Spark as Arrow record batches, built per page. `auto`: on PySpark 4.0 or later and on Databricks Runtime 16.4 LTS or later (classic compute), not on DBR 15.4 LTS, whose read worker takes each batch for one row (`true` is rejected there), and not on serverless compute, where the engine's batch layout is not verified |
-| `partitions_per_feed_range` | `1` | Split every physical partition into N EPK sub-ranges, for N times more tasks. Each sub-range query scans its whole physical partition, so a full read costs about N times the RU of `1` (see [Sizing and performance](#sizing-and-performance)). `auto`: one task per physical partition. |
+| `partitions_per_feed_range` | `1` | Split every physical partition into N EPK sub-ranges, for N times more tasks. Each sub-range query scans its whole physical partition, so a full read costs about N times the RU of `1` (see [Sizing and performance](#sizing-and-performance)). N is 1 to 1024. `auto` lets the data source choose; it reads one task per physical partition, the same as `1`. |
 | `mode` | `PERMISSIVE` | Conversion errors: `PERMISSIVE` (null, plus the corrupt-record column), `DROPMALFORMED` or `FAILFAST` |
 | `raw_json_column` | `body` | Name of the column holding the whole document |
 | `corrupt_record_column` | `_corrupt_record` | Column that receives the JSON of malformed documents (only if it is in the schema) |
@@ -275,17 +281,19 @@ critical = (
 )
 ```
 
-- **Pushed**: `=`, `<=>`, `<`, `<=`, `>`, `>=`, `IN`, `IS NULL`, `LIKE 'a%'`, `LIKE '%a'` and
-  `LIKE '%a%'`, each optionally negated, on STRING, integer, DOUBLE and BOOLEAN columns that are
-  document properties (struct fields included), and on `pk`, `id`, `_ts` and `_etag`. Spark pushes
-  a conjunction of such filters; it does not push `OR`.
+- **Pushed**, each optionally negated: `=`, `<=>`, `<`, `<=`, `>`, `>=` and `IN` on STRING,
+  integer and DOUBLE columns that are document properties (struct fields included), `=`, `<=>` and
+  `IN` on BOOLEAN ones, `LIKE 'a%'`, `LIKE '%a'` and `LIKE '%a%'` on STRING ones, and the same on
+  `pk`, `id`, `_ts` and `_etag`. `IS NULL` is pushed on top-level STRING properties, `pk` and the
+  system columns only. Spark pushes a conjunction of such filters; it does not push `OR`.
 - **Semantics are Spark's.** Spark compares converted values, the service raw JSON, so each filter
   is pushed as a condition every matching document meets, with values as query parameters. A
   comparison on a property also lets through documents where the property has another JSON type
   or is missing under its exact name (it may be read case-insensitively), e.g.
   `c["severity"] = @p OR NOT IS_STRING(c["severity"])`, and Spark applies the filter again. Only
-  filters on `id`, `_rid`, `_self`, `_etag` (STRING), `_ts` (BIGINT) and `pk = '<string>'` (a string
-  that is not also JSON text such as `5` or `true`) are left to the service alone. Measured on an
+  filters on `id`, `_rid`, `_self`, `_etag` (STRING), `_ts` (BIGINT), and `pk = '<string>'` and
+  `pk IN ('<string>', ...)` (strings that are not also JSON text such as `5`, `true` or `[1]`) are
+  left to the service alone. Measured on an
   account, `severity = 'critical'` (1% of 200,000 documents) read 1,942 documents for 81 RU in
   4 s, where the full scan that Spark would filter costs 4,603 RU and 66 s.
 - **`query`** must be `SELECT * FROM <alias> [WHERE ...]`: the filters are added to its `WHERE`.
@@ -296,12 +304,13 @@ critical = (
   documents of the earlier filter, and returns too few rows. Load a new DataFrame for each query
   that filters differently. (Spark's main branch scopes the planned read to its scan.)
 - Not pushed: TIMESTAMP, DATE, DECIMAL, FLOAT, BINARY and complex-type columns, `body`,
-  `feed_range`, hierarchical `pk`, integers beyond ±2^53, range comparisons with strings containing
-  characters from U+D800 up, and `IS NOT NULL` on properties.
+  `feed_range`, hierarchical `pk`, integers beyond ±2^53, range comparisons on BOOLEAN columns and
+  with strings containing characters from U+D800 up, `IS NULL` on nested fields and on non-STRING
+  properties, and `IS NOT NULL` on properties.
 - Projections are not pushed: the Python data source API passes no required columns. Use a
   projecting `query` instead.
 - Documents a pushed filter excludes are not converted, so with `FAILFAST` a malformed document
-  that the filter excludes no longer fails the read.
+  that the filter excludes does not fail the read.
 - PySpark 4.0 has no pushdown API, and the option does nothing there. Where the conf cannot be set
   (Databricks serverless restricts Spark confs), `auto` reads without pushdown and `true` fails.
   The generated query is logged at INFO (without parameter values).
@@ -479,7 +488,11 @@ schema = """id STRING, customerId STRING, seq BIGINT, createdAt TIMESTAMP,
 df = spark.read.format("cosmosdb").schema(schema).options(**conn, container="orders").load()
 ```
 
-Conversions are safe: a value that cannot be represented exactly is an error, never a guess.
+Conversions never guess: a value of the wrong kind (a string that is not a number for BIGINT, a
+fraction for an integer type, an integer out of range) is a conversion failure, handled as `mode`
+says. Four conversions are lossy by design and do not fail, also under `FAILFAST`: DECIMAL rounds
+half-up to its scale, TIMESTAMP keeps microseconds (a seventh fraction digit is dropped), DOUBLE
+holds integers above 2^53 only approximately, and FLOAT narrows a number to single precision.
 
 | Spark type | Accepted JSON values |
 |---|---|
@@ -568,7 +581,7 @@ Entra ID works.
 
 ## Change feed
 
-[docs/MODES.md](docs/MODES.md) describes each mode in detail.
+[docs/MODES.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/docs/MODES.md) describes each mode in detail.
 
 ### Modes
 
@@ -670,7 +683,7 @@ while True:
   `struct(operation <> 'snapshot', lsn, lsn_seq)`, so that every change outranks every snapshot row.
   `_ts` and `crts` do not order versions that share an LSN, and on multi-region-write accounts `_ts`
   can be older than the conflict resolution it survived (see
-  [docs/MODES.md](docs/MODES.md#ordering-sequence_by)).
+  [docs/MODES.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/docs/MODES.md#ordering-sequence_by)).
 - **Deletes** (`AllVersionsAndDeletes`): `apply_as_deletes = expr("operation = 'delete'")`.
 
 ### Initial snapshot
@@ -701,14 +714,14 @@ while True:
 - With `LatestVersion`, a document deleted after the start position stays in the merged result if
   the snapshot read it, as deletes are not in that feed.
 
-The correctness argument is in [docs/DESIGN.md](docs/DESIGN.md#initial-snapshot).
+The correctness argument is in [docs/DESIGN.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/docs/DESIGN.md#initial-snapshot).
 
 ## Snapshot stream
 
 Every micro-batch of a `snapshot_stream=true` stream is one complete snapshot of the container:
 the rows of a batch read plus `snapshot_ts`. An append flow into a bronze table then keeps a
 history of container states, which a separate `create_auto_cdc_from_snapshot_flow` can turn into
-SCD2 ([docs/MODES.md](docs/MODES.md#6-snapshot-stream), mode 6).
+SCD2 ([docs/MODES.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/docs/MODES.md#6-snapshot-stream), mode 6).
 
 ```python
 snapshots = spark.readStream.format("cosmosdb").options(**conn, container="customers", snapshot_stream="true").load()
@@ -820,8 +833,9 @@ throughput for that.
 - Batch reads, the initial snapshot and snapshot streams are not point-in-time snapshots: a
   document modified during the scan may be read before or after the change, and one created during
   the scan may be missing. Each `(pk, id)` is returned at most once per read, also when a partition
-  splits during the read; a document deleted and re-created during the read is returned in the
-  version the read reached first. A projecting `query` without `id` is not de-duplicated.
+  splits during the read (against the service, 70 reads during real partition splits returned no
+  duplicates); a document deleted and re-created during the read is returned in the version the
+  read reached first. A projecting `query` without `id` is not de-duplicated.
 - `query` runs per partition; global `ORDER BY`, `GROUP BY`, `DISTINCT`, `TOP`/`OFFSET` and
   aggregates belong in Spark. Filter pushdown is opt-in, needs PySpark 4.1+ and a Spark conf, and
   needs a fresh `load()` per filtered query on Spark 4.1 to 4.3 (see
@@ -847,8 +861,8 @@ throughput for that.
   while `import pyspark` in the same process gives the environment's client PySpark
   (databricks-connect). The streaming runner then passes an engine `StructType` and uses the
   PySpark 4.2 admission-control protocol, which client PySpark 4.0 lacks.
-  [`_compat.py`](src/cosmosdb_datasource/_compat.py) bridges both (observed with environment
-  version 4: server Spark 4.2.0, client PySpark 4.0.0).
+  [`_compat.py`](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/src/cosmosdb_datasource/_compat.py)
+  bridges both.
 - In SDP `.py` source files, `from databricks.sdk.runtime import dbutils` and
   `dbutils.secrets.get(...)` work (observed on DBR 18.3).
 - `reportLatestOffset()` returns the positions probed by the last trigger. Spark shows them as
@@ -881,6 +895,9 @@ throughput for that.
 
 | Message | Cause and fix |
 |---|---|
+| `Unknown cosmosdb option(s): ...` | A misspelled or unsupported option; the message names the closest known option |
+| `Option(s) ... have no effect here` | The read does not use the option (see [Options](#options)); remove it |
+| `arrow_batches=true does not work on Databricks Runtime 15.4` | Use `arrow_batches=auto` or `false` on DBR 15.x |
 | `spark.readStream.format('cosmosdb') needs the change-feed schema` | Set `change_feed_mode` on the stream |
 | `... only apply to spark.readStream` | Remove `initial_snapshot`, `initial_snapshot_delay_seconds` and `snapshot_stream` from the batch read |
 | `The batch checkpoint has no planned read to commit` | `commit_batch_checkpoint` was called before a read with that `batch_checkpoint_location` was planned |
@@ -899,25 +916,34 @@ throughput for that.
 | `auth_type=service_credential is not supported` | Mint a token from the service credential on the driver and use `auth_type=access_token`, or use `auth_type=service_principal` |
 | `PIP_INSTALL_NOT_AT_TOP_OF_NOTEBOOK` (SDP on classic compute) | Move the `%pip install` cell to the top of the notebook source |
 
+## Versioning
+
+From 1.0.0 the package follows [Semantic Versioning](https://semver.org/). The public API is the
+data source's options and their accepted values, the default schemas and virtual columns, the names
+exported by `cosmosdb_datasource` (`CosmosDBDataSource`, `read_many`, `commit_batch_checkpoint` and
+the error classes), and the formats of stream offsets and batch checkpoints. A minor release may add
+options and columns; only a major release removes or renames them, changes what they do, or makes a
+checkpoint unreadable. Log messages and the modules prefixed with `_` are not part of it.
+
 ## Documentation
 
-- [docs/MODES.md](docs/MODES.md): every read mode, including the snapshot stream, with examples, guarantees and the matching
+- [docs/MODES.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/docs/MODES.md): every read mode, including the snapshot stream, with examples, guarantees and the matching
   target-table pattern; choosing between a snapshot and the change feed; ordering, full-refresh
   rules and costs.
-- [docs/LHP-GUIDE.md](docs/LHP-GUIDE.md): using the data source with Lakehouse Plumber.
-- [examples/databricks-bundle/](examples/databricks-bundle/): a Declarative Automation Bundle with
+- [docs/LHP-GUIDE.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/docs/LHP-GUIDE.md): using the data source with Lakehouse Plumber.
+- [examples/databricks-bundle/](https://github.com/Mmodarre/cosmosdb-spark-datasource/tree/main/examples/databricks-bundle): a Declarative Automation Bundle with
   snapshot SCD2, LatestVersion SCD1 and AllVersionsAndDeletes + `initial_snapshot` SCD1 pipelines,
   and a reconcile job.
-- [examples/lhp/](examples/lhp/): the same patterns as a Lakehouse Plumber project.
-- [docs/PARITY.md](docs/PARITY.md): read-side parity with the Azure Cosmos DB Spark connector.
-- [docs/DESIGN.md](docs/DESIGN.md): SDK and PySpark findings, offsets, the determinism and
+- [examples/lhp/](https://github.com/Mmodarre/cosmosdb-spark-datasource/tree/main/examples/lhp): the same patterns as a Lakehouse Plumber project.
+- [docs/PARITY.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/docs/PARITY.md): read-side parity with the Azure Cosmos DB Spark connector.
+- [docs/DESIGN.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/docs/DESIGN.md): SDK and PySpark findings, offsets, the determinism and
   initial-snapshot arguments, and the test strategy.
-- [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md), [RELEASING.md](RELEASING.md),
-  [SECURITY.md](SECURITY.md).
+- [CHANGELOG.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/CHANGELOG.md), [CONTRIBUTING.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/CONTRIBUTING.md), [RELEASING.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/RELEASING.md),
+  [SECURITY.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/SECURITY.md).
 
 ## License and trademarks
 
-Licensed under the [Apache License 2.0](LICENSE).
+Licensed under the [Apache License 2.0](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/LICENSE).
 
 This project is not affiliated with, endorsed by, or sponsored by Microsoft. Microsoft, Azure and
 Azure Cosmos DB are trademarks of the Microsoft group of companies. Apache Spark and PySpark are

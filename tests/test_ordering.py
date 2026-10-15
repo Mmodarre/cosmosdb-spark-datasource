@@ -1,4 +1,4 @@
-"""Ordering the versions of a document: ``lsn_seq`` for changes that share an LSN (QA-03).
+"""Ordering the versions of a document: ``lsn_seq`` for changes that share an LSN.
 
 The documented rule keeps, per ``(pk, id)``, the row with the largest
 ``struct(operation <> 'snapshot', lsn, lsn_seq)``; a delete means the document is gone.

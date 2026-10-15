@@ -396,8 +396,8 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         if pending and not planned:
             logger.warning(
                 "cosmosdb: initial_snapshot=true, but the first micro-batch of this checkpoint was planned "
-                "without a snapshot (its offset was written by an earlier version, or the option was enabled "
-                "after the batch was planned). No snapshot is read; use a new checkpoint location to read one."
+                "without a snapshot (the option was enabled after the batch was planned). No snapshot is read; "
+                "use a new checkpoint location to read one."
             )
         elif planned and not pending:
             logger.info(

@@ -7,22 +7,22 @@ connector `azure-cosmos-spark` (formats `cosmos.oltp` and `cosmos.oltp.changeFee
 Connector options are quoted from its
 [configuration reference](https://github.com/Azure/azure-sdk-for-java/blob/main/sdk/cosmos/azure-cosmos-spark_3/docs/configuration-reference.md)
 and, where it is silent, from its source (`CosmosConfig.scala`, `CosmosPartitionPlanner.scala`,
-`QueryFilterAnalyzer.scala`). Benchmark figures come from a head-to-head run on Databricks classic
+`QueryFilterAnalyzer.scala`). Figures marked *(manual)* were measured by hand, without a script or
+test in this repository; the benchmark ones come from a head-to-head run on Databricks classic
 compute (DBR 17.3 LTS, Spark 4.0.0, four 8-vCPU workers) against one account in the same region.
 
-Status of this data source on `main`: **Supported** (equivalent capability), **Partially** (exists
-with a material gap), **Missing** (not implemented), **N/A** (not applicable to a Python data
-source).
+Status of this data source in version 1.0.0: **Supported** (equivalent capability), **Partially**
+(exists with a material gap), **Missing** (not implemented), **N/A** (not applicable to a Python
+data source).
 
 ## Summary
 
 | Status | Rows |
 |---|---|
-| Supported | 27 |
+| Supported | 28 |
 | Partially | 11 |
 | Missing | 3 |
 | N/A | 4 |
-| Not verified | 1 |
 
 46 read-side rows; the 11 write rows of the connector are out of scope.
 
@@ -31,7 +31,7 @@ source).
 | Capability | Connector | This data source | Notes |
 |---|---|---|---|
 | Account key | `spark.cosmos.auth.type=MasterKey`, `spark.cosmos.accountKey` | **Supported**: `auth_type=key`, `account_key` | |
-| Service principal, secret | `ServicePrincipal`, `spark.cosmos.auth.aad.clientId`, `.clientSecret`, `spark.cosmos.account.tenantId` (plus subscription and resource group) | **Supported**: `auth_type=service_principal`, `tenant_id`, `client_id`, `client_secret` | Data-plane RBAC only: no subscription or resource group. Unit-tested. |
+| Service principal, secret | `ServicePrincipal`, `spark.cosmos.auth.aad.clientId`, `.clientSecret`, `spark.cosmos.account.tenantId` (plus subscription and resource group) | **Supported**: `auth_type=service_principal`, `tenant_id`, `client_id`, `client_secret` | Data-plane RBAC only: no subscription or resource group. Run on Databricks (serverless, classic dedicated and standard access mode). |
 | Service principal, certificate | `spark.cosmos.auth.aad.clientCertPemBase64` | **Supported**: `client_certificate` (base64 PEM or PKCS#12), `client_certificate_password` | `CertificateCredential`; unit-tested with a real certificate, not against Entra ID. |
 | Managed identity | `ManagedIdentity`, optional `spark.cosmos.auth.aad.clientId` / `resourceId` | **Partially**: `auth_type=default` (`DefaultAzureCredential`, which includes managed identity) | Tested with the Azure CLI credential, not with a managed identity. |
 | Custom token provider | `AccessToken` with `spark.cosmos.accountDataResolverServiceName` (a JVM class) | **Partially**: `auth_type=access_token` (pre-minted token, for example from a Unity Catalog service credential on the driver; not refreshed) | Unity Catalog service credentials cannot be resolved where Spark plans Python data source reads, so `auth_type=service_credential` is rejected. |
@@ -42,19 +42,19 @@ source).
 |---|---|---|---|
 | Raw JSON | `spark.cosmos.read.inferSchema.enabled=false` (`_rawBody, id, _ts`) | **Supported**: default schema `id, pk, _ts, _etag, body` | |
 | Schema inference by sampling | `spark.cosmos.read.inferSchema.enabled` (default `true`), `.samplingSize` (1000), `.query`, `.includeSystemProperties`, `.includeTimestamp`, `.forceNullableProperties` | **Supported**: `infer_schema` (default `false`), `sampling_size` (1000), `sampling_query`, `infer_system_properties`, `infer_timestamp`; columns are always nullable | The same merge rules; integers are BIGINT (the connector infers INT or BIGINT), and the sample is spread over all physical partitions (the connector reads `TOP n` from the first ones). |
-| User-specified schema | `.schema(...)`, `spark.cosmos.read.schemaConversionMode` `Relaxed` / `Strict` | **Supported**: `.schema(...)`, `mode` `PERMISSIVE` / `DROPMALFORMED` / `FAILFAST`, corrupt-record column | Conversions are documented and never lossy. |
-| Predicate pushdown | Automatic: `EqualTo`, `EqualNullSafe`, ranges, `In`, `IsNull`, `IsNotNull`, `StringStartsWith` / `EndsWith` / `Contains`, `And`, `Or`, `Not` | **Partially**: `filter_pushdown=true` or `auto` with `spark.sql.python.filterPushdown.enabled=true`, PySpark 4.1+; the same filters, each optionally negated | Spark's Python API pushes conjunctions of leaves only, never `Or`. Spark 4.1 to 4.3 reuse the read planned with pushed filters for other scans of the same loaded DataFrame, so each filtered query needs its own `load()`. A 1% equality filter over 200,000 documents: 81 RU instead of 4,603. |
+| User-specified schema | `.schema(...)`, `spark.cosmos.read.schemaConversionMode` `Relaxed` / `Strict` | **Supported**: `.schema(...)`, `mode` `PERMISSIVE` / `DROPMALFORMED` / `FAILFAST`, corrupt-record column | Conversions are documented. DECIMAL rounding, sub-microsecond timestamp digits, integers beyond 2^53 in DOUBLE and FLOAT narrowing are lossy without failing; other mismatches are conversion failures. |
+| Predicate pushdown | Automatic: `EqualTo`, `EqualNullSafe`, ranges, `In`, `IsNull`, `IsNotNull`, `StringStartsWith` / `EndsWith` / `Contains`, `And`, `Or`, `Not` | **Partially**: `filter_pushdown=true` or `auto` with `spark.sql.python.filterPushdown.enabled=true`, PySpark 4.1+; the same leaf filters, each optionally negated, except `IsNotNull` on properties, `IsNull` on nested and non-STRING properties, and range comparisons on BOOLEAN | Spark's Python API pushes conjunctions of leaves only, never `Or`. Spark 4.1 to 4.3 reuse the read planned with pushed filters for other scans of the same loaded DataFrame, so each filtered query needs its own `load()`. A 1% equality filter over 200,000 documents: 81 RU instead of 4,603 *(manual)*. |
 | Custom query | `spark.cosmos.read.customQuery` | **Supported**: `query`, `query_parameters` | Run per input partition in both. |
-| Projection pushdown | Not documented; the generated query is `SELECT * ... WHERE ...` | **Partially**: a projecting `query` | The Python API passes no required columns. `SELECT c.id, c._ts` cost 15.8 instead of 23.0 RU per 1,000 documents. |
-| One task per physical partition | `spark.cosmos.read.partitioning.strategy=Default` / `Restrictive` | **Supported**: `partitions_per_feed_range=1` (default) | The fastest setting for both in the benchmark. |
-| Storage-aligned split | `Aggressive` (about 5 GiB per partition, at least `1 + 2 x defaultParallelism`) | **Partially**: `partitions_per_feed_range=N`; `auto` reads one task per physical partition | An EPK sub-range query scans its whole physical partition, in both libraries (connector `Aggressive`: 3.4x the RU), so splitting only pays when the client, not the service, limits a partition. |
+| Projection pushdown | Not documented; the generated query is `SELECT * ... WHERE ...` | **Partially**: a projecting `query` | The Python API passes no required columns. `SELECT c.id, c._ts` cost 15.8 instead of 23.0 RU per 1,000 documents *(manual)*. |
+| One task per physical partition | `spark.cosmos.read.partitioning.strategy=Default` / `Restrictive` | **Supported**: `partitions_per_feed_range=1` (default) | The fastest setting for both in the benchmark *(manual)*. |
+| Storage-aligned split | `Aggressive` (about 5 GiB per partition, at least `1 + 2 x defaultParallelism`) | **Partially**: `partitions_per_feed_range=N`; `auto` reads one task per physical partition | An EPK sub-range query scans its whole physical partition, in both libraries (connector `Aggressive`: 3.4x the RU *(manual)*), so splitting only pays when the client, not the service, limits a partition. |
 | Targeted partition count | `Custom`, `spark.cosmos.partitioning.targetedCount` | **Partially**: `partitions_per_feed_range=N` per feed range | |
-| Logical-partition scoping | `spark.cosmos.partitioning.feedRangeFilter`; UDFs `GetFeedRangeForPartitionKeyValue`, `GetFeedRangeForHierarchicalPartitionKeyValues`, `GetOverlappingFeedRange` | **Supported**: `partition_key` (a key or a hierarchical prefix), and pushed `pk = 'v'` / `pk IN (...)` | One task, routed by partition key: 4.3 RU for a 50-document partition; an EPK-range query for the same key scans its physical partition (2,386 RU). |
-| readMany / point reads | `spark.cosmos.read.readManyFiltering.enabled`, `_itemIdentity`, UDF `GetCosmosItemIdentityValue`; `readManyByPartitionKeys` | **Supported**: `item_ids` option; `read_many(identities, ...)` for a DataFrame of `(id, pk)` | Through `read_items`: 1,000 items for 301 RU. No `_itemIdentity` column; `readManyByPartitionKeys` maps to `partition_key`. |
+| Logical-partition scoping | `spark.cosmos.partitioning.feedRangeFilter`; UDFs `GetFeedRangeForPartitionKeyValue`, `GetFeedRangeForHierarchicalPartitionKeyValues`, `GetOverlappingFeedRange` | **Supported**: `partition_key` (one key, or a prefix of a hierarchical key); several keys through a pushed `pk IN (...)` (or `pk = 'v'`) | One task per key, routed by partition key: 4.3 RU for a 50-document partition; an EPK-range query for the same key scans its physical partition (2,386 RU) *(manual)*. |
+| readMany / point reads | `spark.cosmos.read.readManyFiltering.enabled`, `_itemIdentity`, UDF `GetCosmosItemIdentityValue`; `readManyByPartitionKeys` | **Supported**: `item_ids` option; `read_many(identities, ...)` for a DataFrame of `(id, pk)` | Through `read_items`: 1,000 items for 301 RU *(manual)*. No `_itemIdentity` column; `readManyByPartitionKeys` maps to `partition_key` (one key) or a pushed `pk IN (...)`. |
 | Runtime filtering | `spark.cosmos.read.runtimeFiltering.enabled` | **N/A** | No runtime-filter hook in the Python API. |
-| Integrated cache | `spark.cosmos.read.maxIntegratedCacheStalenessInMS` | **Supported**: `max_integrated_cache_staleness_ms` on queries | Needs a dedicated-gateway endpoint; accepted, and ignored, by the standard gateway (checked on an account without one). |
-| Page size | `spark.cosmos.read.maxItemCount` (1000) | **Supported**: `page_size` (5000) | Both libraries read fastest with 5,000-item pages in the benchmark. |
-| Consistency | `spark.cosmos.read.forceEventualConsistency` (default `true`), `.consistencyStrategy` | **Supported**: `consistency_level` (default: the account's) | Same RU per read at Session and Eventual. |
+| Integrated cache | `spark.cosmos.read.maxIntegratedCacheStalenessInMS` | **Supported**: `max_integrated_cache_staleness_ms` on queries | Needs a dedicated-gateway endpoint; accepted, and ignored, by the standard gateway (checked on an account without one, *(manual)*). |
+| Page size | `spark.cosmos.read.maxItemCount` (1000) | **Supported**: `page_size` (5000) | Both libraries read fastest with 5,000-item pages in the benchmark *(manual)*. |
+| Consistency | `spark.cosmos.read.forceEventualConsistency` (default `true`), `.consistencyStrategy` | **Supported**: `consistency_level` (default: the account's) | Same RU per read at Session and Eventual *(manual)*. |
 | Preferred regions | `spark.cosmos.preferredRegionsList` | **Supported**: `preferred_regions` | |
 | Transport | Direct mode (TCP) by default, `spark.cosmos.useGatewayMode` | **Partially**: Gateway (HTTPS) only | The Python SDK has no Direct mode. |
 
@@ -63,10 +63,10 @@ source).
 | Capability | Connector | This data source | Notes |
 |---|---|---|---|
 | LatestVersion | `spark.cosmos.changeFeed.mode=Incremental` / `LatestVersion` | **Supported**: `change_feed_mode=LatestVersion` | |
-| AllVersionsAndDeletes | `FullFidelity` / `AllVersionsAndDeletes` (documented as experimental) | **Supported**: `change_feed_mode=AllVersionsAndDeletes`, LSN-bounded, replayable micro-batches | Both returned identical changes in the benchmark. |
+| AllVersionsAndDeletes | `FullFidelity` / `AllVersionsAndDeletes` (documented as experimental) | **Supported**: `change_feed_mode=AllVersionsAndDeletes`, LSN-bounded, replayable micro-batches | Both returned identical changes in the benchmark *(manual)*. |
 | Start position | `spark.cosmos.changeFeed.startFrom` `Beginning` / `Now` / point in time | **Supported**: `start_from` `Beginning` / `Now` / ISO-8601 (AllVersionsAndDeletes: `Now`) | A checkpoint wins in both. |
 | Initial snapshot with CDC in one stream | none | **Supported**: `initial_snapshot=true` | This data source only. |
-| Items per micro-batch | `spark.cosmos.changeFeed.itemCountPerTriggerHint` | **Partially**: `max_items_per_trigger`, a budget of LSNs | On Spark 4.0 / 4.1 a capped `Trigger.AvailableNow` run is one micro-batch (the connector's hint gave one batch of all changes); a loop of capped batch reads with a checkpoint works through a backlog there. |
+| Items per micro-batch | `spark.cosmos.changeFeed.itemCountPerTriggerHint` | **Partially**: `max_items_per_trigger`, a budget of LSNs | On Spark 4.0 / 4.1 a capped `Trigger.AvailableNow` run is one micro-batch (the connector's hint gave one batch of all changes *(manual)*); a loop of capped batch reads with a checkpoint works through a backlog there. |
 | Streaming checkpoints | `checkpointLocation` | **Supported** | |
 | Change feed as a batch read | `spark.read.format("cosmos.oltp.changeFeed")`, `spark.cosmos.changeFeed.batchCheckpointLocation` | **Supported**: `spark.read` with change-feed options; `end_at`; `batch_checkpoint_location` with `commit_batch_checkpoint()` | A read replays its range until the job commits it, and reports whether it caught up, so capped reads in a loop work through a backlog on Spark 4.0 and 4.1. |
 | Adaptive micro-batch sizing | `spark.cosmos.changeFeed.performance.monitoring.enabled` | **Missing** | |
@@ -82,7 +82,7 @@ transactional batch, point writes, serialization options and streaming writes
 
 | Capability | Connector | This data source | Notes |
 |---|---|---|---|
-| Local throughput control | `spark.cosmos.throughputControl.enabled`, `.name`, `.targetThroughput`, `.targetThroughputThreshold` | **Partially**: `target_ru_per_second`, an RU/s budget per read, enforced by token buckets shared by a read's tasks on each executor | No `targetThroughputThreshold` (a fraction of the provisioned RU/s). A read capped at 20 RU/s ran at 18.8 RU/s. |
+| Local throughput control | `spark.cosmos.throughputControl.enabled`, `.name`, `.targetThroughput`, `.targetThroughputThreshold` | **Partially**: `target_ru_per_second`, an RU/s budget per read, enforced by token buckets shared by a read's tasks on each executor | No `targetThroughputThreshold` (a fraction of the provisioned RU/s). A read capped at 20 RU/s ran at 18.8 RU/s *(manual)*. |
 | Global throughput control | `spark.cosmos.throughputControl.globalControl.*` (lease container) | **Missing** | Not provided: nothing coordinates budgets across reads or jobs. |
 | Priority-based execution | `spark.cosmos.throughputControl.priorityLevel` | **Supported**: `priority=Low` / `High` | No throughput-control group needed. |
 | Throughput buckets | `spark.cosmos.throughputControl.throughputBucket` | **Supported**: `throughput_bucket` (1 to 5) on every request | |
@@ -97,11 +97,11 @@ transactional batch, point writes, serialization options and streaming writes
 | Spark UI custom metrics | change-feed performance metrics | **N/A** | The Python API reports only Spark's built-in Python metrics. |
 | Catalog API | `CosmosCatalog`: databases, containers, throughput | **N/A** | Spark catalogs are JVM plugins. |
 | Hierarchical partition keys | reads, writes, identity UDFs | **Partially**: reads (`pk` as a JSON array, MultiHash sub-splitting) | |
-| Partition splits during reads | handled | **Partially**: handled, tested against a service fake, not against a live split | |
-| Spark versions | one artifact per Spark minor (3.3 to 4.1) | **Supported**: one wheel for Spark 4.0+ | No Spark 3.x: the Python Data Source API starts with 4.0. |
+| Partition splits during reads | handled | **Supported**: handled | Tested against a service fake in CI. Verified against the service: streams in both modes ran through two consecutive live splits with no change lost or delivered twice, and 70 reads during real splits returned no duplicates. |
+| Spark versions | one artifact per Spark minor (3.3 to 4.1) | **Supported**: one wheel for Spark 4.0+, and Databricks Runtime 15.4 LTS and later | No OSS Spark 3.x: the Python Data Source API starts with 4.0; DBR 15.4 and 16.4 (Spark 3.5) include it. |
 | Databricks serverless and Lakeflow SDP | not available (no JVM libraries on serverless) | **Supported** | The main reason this data source exists. |
 | Classic compute, dedicated access mode | supported | **Supported** | |
-| Classic compute, standard access mode | needs the Maven coordinate on the allowlist | **Not verified** | |
+| Classic compute, standard access mode | needs the Maven coordinate on the allowlist | **Supported** | Verified on DBR 17.3: batch reads and streams; a wheel from a Unity Catalog volume installs as a cluster library without an allowlist entry. |
 
 ## 7. Python Data Source API constraints
 

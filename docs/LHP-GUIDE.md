@@ -9,7 +9,7 @@ through LHP's `custom_datasource` load.
 `lhp generate`). The change-feed and batch pipelines have not been run on Databricks as generated
 here; the same three patterns, written by hand, are in
 [`examples/databricks-bundle/`](../examples/databricks-bundle/). The two snapshot-history pipelines
-ran on Databricks serverless SDP in an earlier form of this project. Statements about runtime
+have been run on Databricks serverless SDP, though not from the files generated here. Statements about runtime
 behaviour that rest on the data source's own tests or on the hand-written pipelines say so; anything
 else is marked *not verified*.
 
@@ -39,7 +39,7 @@ LHP sends telemetry by default; set `DO_NOT_TRACK=1` or run `lhp telemetry off` 
 The reader classes run in Python worker processes, which import them (and `azure-cosmos`) from
 installed packages. LHP's `custom_datasource` copies only one entry file into the pipeline, so the
 implementation must come from the pipeline environment: `config/pipeline_config.yaml` adds
-`${datasource_package}` (default `cosmosdb-spark-datasource~=0.3.1`; a wheel path in a Unity
+`${datasource_package}` (default `cosmosdb-spark-datasource~=1.0`; a wheel path in a Unity
 Catalog volume works too) and `azure-identity~=1.19` to `environment.dependencies`.
 
 Write version ranges with `~=`: on DBR 18.3, SDP failed to install `azure-identity>=1.19,<2` while
@@ -77,7 +77,7 @@ dev:
   bronze_schema: cosmosdb_lhp_bronze
   silver_schema: cosmosdb_lhp_silver
   ops_schema: cosmosdb_lhp_ops
-  datasource_package: cosmosdb-spark-datasource~=0.3.1
+  datasource_package: cosmosdb-spark-datasource~=1.0
   cosmos_database: <database>
   customers_container: customers
   orders_container: orders

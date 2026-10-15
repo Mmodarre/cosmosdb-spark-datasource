@@ -9,7 +9,7 @@ dev:
   silver_schema: cosmosdb_lhp_silver
   ops_schema: cosmosdb_lhp_ops
   # A version from PyPI, or the path of a wheel in a Unity Catalog volume.
-  datasource_package: cosmosdb-spark-datasource~=0.3.1
+  datasource_package: cosmosdb-spark-datasource~=1.0
 
   cosmos_database: <database>
   customers_container: customers
