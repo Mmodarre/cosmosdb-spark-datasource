@@ -105,7 +105,7 @@ transactional batch, point writes, serialization options and streaming writes
 
 ## 7. Python Data Source API constraints
 
-- `pushFilters` exists from Spark 4.1 (Databricks back-ports it to DBR 17.3; OSS 4.0 and DBR 15.4 do not have it) and is gated by
+- `pushFilters` exists from Spark 4.1 (Databricks back-ports it to DBR 17.3; OSS 4.0 and DBR 15.4 do not have it, and DBR 16.4 defines it but never calls it) and is gated by
   `spark.sql.python.filterPushdown.enabled` (default `false`); a reader that implements it fails
   planning while the conf is off. Spark sends only leaves and negated leaves, and caches the read
   planned with pushed filters on the loaded relation up to 4.3 (see the README, "Filter pushdown").
