@@ -813,7 +813,9 @@ def test_initial_snapshot_all_versions_with_concurrent_writes_converges(make_con
         initial_snapshot_delay_seconds="1",
         partitions_per_feed_range=4,
         page_size=50,
-        max_items_per_trigger=100,
+        # Below the writes made during the snapshot (at least about 40, at 0.3 s of round trip per
+        # write), so run 1 drains them in several capped batches.
+        max_items_per_trigger=20,
     )
     h = StreamHarness(opts, admission_control=True)
     names = h.schema.fieldNames()
