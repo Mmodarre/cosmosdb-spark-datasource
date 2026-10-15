@@ -5,6 +5,7 @@ from __future__ import annotations
 from pyspark.sql.datasource import DataSource, DataSourceReader, DataSourceStreamReader
 from pyspark.sql.types import StructType
 
+from cosmosdb_datasource import _compat
 from cosmosdb_datasource._compat import filter_pushdown_planner, local_struct_type
 from cosmosdb_datasource.errors import CosmosConfigError
 from cosmosdb_datasource.options import (
@@ -71,6 +72,15 @@ class CosmosDBDataSource(DataSource):
         else:
             self._reject_unused("documents")
         pushdown = self._opts.filter_pushdown
+        if pushdown == "true" and _compat.filter_pushdown_supported() is False:
+            import pyspark
+
+            raise CosmosConfigError(
+                "filter_pushdown=true needs the filter pushdown API of Python data sources "
+                f"(DataSourceReader.pushFilters), which PySpark {pyspark.__version__} here does not have; it "
+                "is in PySpark 4.1 and later, and in Databricks Runtime 17.3 LTS and later. Use "
+                "filter_pushdown=auto or false, and write the filter into 'query' to have the service apply it."
+            )
         # A reader with pushFilters fails planning while spark.sql.python.filterPushdown.enabled is false
         # (DATA_SOURCE_PUSHDOWN_DISABLED), so "auto" returns it only to Spark's pushdown planner, which
         # runs only when the conf is true. Pushdown is opt-in because Spark 4.1 to 4.3 cache the read

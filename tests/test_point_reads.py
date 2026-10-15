@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pyarrow as pa
 import pytest
@@ -117,7 +118,7 @@ def test_many_item_ids_are_planned_by_partition(make_store) -> None:
     assert sum(len(p.items) for p in parts) == 120
 
 
-def test_pushed_pk_equality_reads_only_those_logical_partitions(make_store) -> None:
+def test_pushed_pk_equality_reads_only_those_logical_partitions(make_store, pushdown_api) -> None:
     store = make_store(partitions=3)
     load(store)
     opts = fake_options(store, filter_pushdown="true")
@@ -132,7 +133,7 @@ def test_pushed_pk_equality_reads_only_those_logical_partitions(make_store) -> N
     assert len(remaining) == 1 and not any(isinstance(p, CosmosLogicalPartition) for p in parts)
 
 
-def test_read_many_function_reads_identity_batches(make_store, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_many_function_reads_identity_batches(make_store, caplog: pytest.LogCaptureFixture) -> None:
     from cosmosdb_datasource import readmany
 
     store = make_store(partitions=2)
@@ -145,6 +146,10 @@ def test_read_many_function_reads_identity_batches(make_store, monkeypatch: pyte
 
         def select(self, *columns: str) -> Frame:
             captured["columns"] = columns
+            return self
+
+        def dropDuplicates(self) -> Frame:
+            captured["deduplicated"] = True
             return self
 
         def mapInArrow(self, fn, schema):
@@ -161,10 +166,13 @@ def test_read_many_function_reads_identity_batches(make_store, monkeypatch: pyte
         )
         == "frame"
     )
-    assert captured["columns"] == ("doc", "key")
+    assert captured["columns"] == ("doc", "key") and captured["deduplicated"]
     batch = pa.RecordBatch.from_pydict({"doc": ["d1", "d7", "nope", None], "key": ["p1", "p1", "p1", "p1"]})
-    out = list(captured["fn"](iter([batch])))
+    with caplog.at_level(logging.DEBUG, logger="cosmosdb_datasource"):
+        out = list(captured["fn"](iter([batch])))
     assert pa.Table.from_batches(out).to_pylist() == [{"id": "d1", "v": 1}, {"id": "d7", "v": 7}]
+    (metrics,) = [r.getMessage() for r in caplog.records if "read_many finished" in r.getMessage()]
+    assert "items=3 found=2 request_charge=" in metrics and caplog.records[-1].levelno == logging.DEBUG
     with pytest.raises(CosmosConfigError, match="does not take"):
         readmany.read_many(Frame(), **fake_options(store, partition_key="p1"))
     with pytest.raises(CosmosConfigError, match="does not take"):
@@ -174,3 +182,8 @@ def test_read_many_function_reads_identity_batches(make_store, monkeypatch: pyte
             readmany.read_many(Frame(), **fake_options(store), **{name: value})
     readmany.read_many(Frame(), **fake_options(store, priority="Low", mode="FAILFAST", slow_request_ms="500"))
     readmany.read_many(Frame(), **fake_options(store, unknown_options="warn"), injected="x")
+    caplog.clear()
+    readmany.read_many(Frame(), **fake_options(store, log_metrics="true"))
+    with caplog.at_level(logging.WARNING, logger="cosmosdb_datasource"):
+        list(captured["fn"](iter([batch])))
+    assert any("read_many finished" in r.getMessage() and "request_charge=" in r.getMessage() for r in caplog.records)

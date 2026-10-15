@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # make ``tests.*`` importable
 
-from cosmosdb_datasource import retry
+from cosmosdb_datasource import _compat, retry
 from cosmosdb_datasource.options import TEST_HOOKS_ENV
 from tests.fake_cosmos import FakeCosmosStore
 
@@ -23,6 +23,12 @@ _counter = itertools.count()
 @pytest.fixture(autouse=True)
 def _test_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(TEST_HOOKS_ENV, "1")
+
+
+@pytest.fixture
+def pushdown_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let filter_pushdown=true build its reader also on PySpark 4.0, which has no pushFilters to call it."""
+    monkeypatch.setattr(_compat, "filter_pushdown_supported", lambda: True)
 
 
 @pytest.fixture

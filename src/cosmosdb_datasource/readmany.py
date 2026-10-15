@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -9,6 +10,7 @@ from pyspark.sql import DataFrame
 from pyspark.sql.types import DataType, StructType
 
 from cosmosdb_datasource import _compat, client, retry
+from cosmosdb_datasource._base import log_metrics
 from cosmosdb_datasource.arrow import record_batches
 from cosmosdb_datasource.auth import mint_driver_token
 from cosmosdb_datasource.documents import PartitionKeyInfo
@@ -28,13 +30,14 @@ def read_many(
 ) -> DataFrame:
     """Return the documents whose ``(id, partition key)`` are rows of ``identities``, read by point reads.
 
-    ``options`` are the data source's connection and conversion options; options that choose what to read
-    (such as ``query`` or ``page_size``) are rejected. The partition key column holds
-    the key in its JSON type (a string, number or boolean; an array for hierarchical keys). Rows of
-    documents that do not exist are left out. The result has the batch-read schema, or ``schema``.
+    ``options`` are the data source's connection and conversion options and ``log_metrics``; options that
+    choose what to read (such as ``query`` or ``page_size``) are rejected. The partition key column holds
+    the key in its JSON type (a string, number or boolean; an array for hierarchical keys). Each identity
+    is read once, however often it occurs in ``identities``; rows of documents that do not exist are left
+    out. The result has the batch-read schema, or ``schema``.
     """
     given = {str(k).strip().lower() for k, v in options.items() if v is not None}
-    stray = sorted(given & set(READ_OPTIONS))
+    stray = sorted(given & (set(READ_OPTIONS) - {"log_metrics"}))
     if stray:
         raise CosmosConfigError(
             f"read_many does not take option(s) {', '.join(stray)}: it takes the connection and conversion options."
@@ -54,6 +57,9 @@ def read_many(
     policy = retry.RetryPolicy(max_retries=opts.max_retries, max_backoff_seconds=opts.retry_max_backoff_seconds)
 
     def read(batches: Iterator[Any]) -> Iterator[Any]:
+        started = time.monotonic()
+        requested = found = 0
+        charge = 0.0
         backend = client.get_backend(opts, token)
         props = retry.call_with_retry(lambda: backend.properties(), policy, "reading container properties")
         pk = PartitionKeyInfo.from_container_properties(props)
@@ -68,6 +74,7 @@ def read_many(
             ids = batch.column(0).to_pylist()
             keys = batch.column(1).to_pylist()
             items = list(dict.fromkeys((i, _hashable(k)) for i, k in zip(ids, keys, strict=True) if i is not None))
+            requested += len(items)
             rows = []
             for start in range(0, len(items), ITEMS_PER_REQUEST):
                 chunk = [(i, _key(k)) for i, k in items[start : start + ITEMS_PER_REQUEST]]
@@ -75,15 +82,20 @@ def read_many(
                 def fetch(chunk: list[tuple[str, Any]] = chunk) -> tuple[list[dict[str, Any]], float]:
                     return backend.read_items(chunk)
 
-                docs, _charge = retry.call_with_retry(fetch, policy, "reading items")
+                docs, request_charge = retry.call_with_retry(fetch, policy, "reading items")
+                charge += request_charge
+                found += len(docs)
                 for doc in docs:
                     row = builder.build(RecordView(doc, id=doc.get("id"), pk=pk.render(doc)))
                     if row is not None:
                         rows.append(row)
             if rows:
                 yield from record_batches(iter(rows), out_schema, len(rows))
+        log_metrics(opts, "read_many", started, items=requested, found=found, request_charge=charge)
 
-    return identities.select(identities[id_column], identities[pk_column]).mapInArrow(read, out_schema)
+    # Deduplicated across the whole input, so each document is read, and returned, once.
+    wanted = identities.select(identities[id_column], identities[pk_column]).dropDuplicates()
+    return wanted.mapInArrow(read, out_schema)
 
 
 def _hashable(key: Any) -> Any:

@@ -378,6 +378,9 @@ def test_partition_key_item_ids_and_read_many_function(seeded) -> None:
         def select(self, *columns: str) -> Any:
             return self
 
+        def dropDuplicates(self) -> Any:
+            return self
+
         def mapInArrow(self, fn: Any, schema: Any) -> Any:
             return fn
 

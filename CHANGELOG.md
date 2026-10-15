@@ -20,11 +20,14 @@ First public release.
 - Typed reads: user-specified schemas with documented conversions in `PERMISSIVE`, `DROPMALFORMED`
   or `FAILFAST` mode, and schema inference from a sample (`infer_schema`, `sampling_size`,
   `sampling_query`).
-- Opt-in filter pushdown for batch reads (`filter_pushdown`, PySpark 4.1 and later with
-  `spark.sql.python.filterPushdown.enabled=true`): Spark's filters become parameterized `WHERE`
-  predicates of the query, and Spark re-applies every filter the service cannot evaluate exactly.
+- Opt-in filter pushdown for batch reads (`filter_pushdown`, PySpark 4.1 and later or Databricks
+  Runtime 17.3 LTS and later, with `spark.sql.python.filterPushdown.enabled=true`): Spark's filters
+  become parameterized `WHERE` predicates of the query, and Spark re-applies every filter the
+  service cannot evaluate exactly. `filter_pushdown=true` fails where the runtime has no pushdown
+  API (OSS PySpark 4.0, DBR 15.4 LTS) instead of reading without it.
 - Logical-partition and point reads: `partition_key`, `item_ids`, and `read_many(identities)` for a
-  DataFrame of `(id, pk)` rows; pushed `pk = 'v'` and `pk IN (...)` filters with string keys on a
+  DataFrame of `(id, pk)` rows, which reads each identity once and logs its request charge with
+  `log_metrics`; pushed `pk = 'v'` and `pk IN (...)` filters with string keys on a
   non-hierarchical partition key read only those logical partitions.
 - Change-feed streams with `spark.readStream.format("cosmosdb")` in `LatestVersion` and
   `AllVersionsAndDeletes` mode: micro-batches bounded by LSN per range, so a retried or replayed
@@ -40,9 +43,10 @@ First public release.
   `batch_checkpoint_location`, a read repeats its range until `commit_batch_checkpoint()` marks it
   written.
 - Authentication with an account key, an Entra ID service principal (client secret or
-  certificate), a pre-minted access token (for example one minted on the driver from a Unity
-  Catalog service credential), or `DefaultAzureCredential`. Tokens are minted on the driver and
-  shipped to the tasks; secrets never appear in logs, `repr()` or error messages.
+  certificate; one that cannot be loaded fails with `CosmosAuthError` naming the option), a
+  pre-minted access token (for example one minted on the driver from a Unity Catalog service
+  credential), or `DefaultAzureCredential`. Tokens are minted on the driver and shipped to the
+  tasks; secrets never appear in logs, `repr()` or error messages.
 - Throughput control: `priority`, `throughput_bucket`, and an RU budget per read
   (`target_ru_per_second`).
 - Client and diagnostics options: `preferred_regions`, `consistency_level`, timeouts, `tls_verify`

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from pyspark.sql.types import BooleanType, DoubleType, LongType, StringType, StructField, StructType
 
+from cosmosdb_datasource._compat import filter_pushdown_supported as unpatched_filter_pushdown_supported
 from cosmosdb_datasource.batch import CosmosBatchReader
 from cosmosdb_datasource.documents import PartitionKeyInfo
 from cosmosdb_datasource.errors import CosmosConfigError
@@ -18,6 +19,8 @@ from cosmosdb_datasource.pushdown import CosmosPushdownBatchReader, Translator, 
 from tests.conftest import fake_options
 from tests.fake_query import compile_query
 from tests.harness import make_source, run_batch, run_batch_with_filters
+
+pytestmark = pytest.mark.usefixtures("pushdown_api")  # the translation is tested on every PySpark
 
 # Stand-ins with the names and fields of pyspark.sql.datasource's filters (PySpark >= 4.1), which the
 # translator dispatches on by name, as for the Databricks engine's own classes. And and Or are not sent
@@ -304,6 +307,54 @@ def test_reader_selection(make_store) -> None:
     assert isinstance(run_as_main.plan(auto, schema), CosmosPushdownBatchReader)
     with pytest.raises(CosmosConfigError, match="filter_pushdown"):
         make_source(fake_options(store, filter_pushdown="maybe"))
+
+
+@pytest.mark.parametrize(
+    ("client", "engine", "supported"),
+    [
+        (True, None, True),  # PySpark 4.1+, or DBR 17.3 with its back-port
+        (False, None, False),  # OSS PySpark 4.0, DBR 15.4 LTS
+        (False, True, True),  # serverless: the engine's PySpark runs the reader
+        (True, False, False),
+        (True, "missing", None),  # the engine's module cannot be inspected
+    ],
+)
+def test_the_pushdown_api_of_the_running_pyspark(monkeypatch, client, engine, supported) -> None:
+    import sys
+
+    from pyspark.sql import datasource as client_module
+
+    class Reader:
+        pass
+
+    if client:
+        Reader.pushFilters = lambda self, filters: filters
+    monkeypatch.setattr(client_module, "DataSourceReader", Reader)
+    if engine is not None:
+        monkeypatch.setitem(sys.modules, "_engine_pyspark", types.ModuleType("_engine_pyspark"))
+        if engine != "missing":
+            module = types.ModuleType("_engine_pyspark.sql.datasource")
+            module.DataSourceReader = type("DataSourceReader", (), {"pushFilters": lambda self, f: f} if engine else {})
+            monkeypatch.setitem(sys.modules, "_engine_pyspark.sql.datasource", module)
+        else:
+            monkeypatch.setitem(sys.modules, "_engine_pyspark.sql.datasource", None)
+    assert unpatched_filter_pushdown_supported() is supported
+
+
+@pytest.mark.parametrize("supported", [False, None, True])
+def test_filter_pushdown_true_fails_where_spark_cannot_push(make_store, monkeypatch, supported) -> None:
+    from cosmosdb_datasource import _compat
+
+    monkeypatch.setattr(_compat, "filter_pushdown_supported", lambda: supported)
+    store = make_store()
+    true, auto = make_source(pushdown_options(store)), make_source(fake_options(store, filter_pushdown="auto"))
+    schema = true.schema()
+    if supported is False:
+        with pytest.raises(CosmosConfigError, match=r"filter_pushdown=true needs .*pushFilters.*'query'"):
+            true.reader(schema)
+    else:  # unknown: the reader is built as before
+        assert isinstance(true.reader(schema), CosmosPushdownBatchReader)
+    assert type(auto.reader(schema)) is CosmosBatchReader
 
 
 def load_typed(store) -> None:

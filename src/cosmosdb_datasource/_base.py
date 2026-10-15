@@ -51,6 +51,16 @@ AVAILABLE_NOW_WRAPPER_UNSUPPORTED = (
 )
 
 
+def log_metrics(opts: CosmosOptions, what: str, started: float, **values: Any) -> None:
+    """Log the metrics of a read: at WARNING with ``log_metrics=true``, so they reach executor logs."""
+    level = logging.WARNING if opts.log_metrics else logging.DEBUG
+    if not logger.isEnabledFor(level):
+        return
+    elapsed = time.monotonic() - started
+    details = " ".join(f"{k}={v:.2f}" if isinstance(v, float) else f"{k}={v}" for k, v in values.items())
+    logger.log(level, "cosmosdb %s finished in %.2fs %s", what, elapsed, details)
+
+
 class CosmosEmptyPartition(InputPartition):
     """The single partition of a batch read that has nothing to read.
 
@@ -174,12 +184,7 @@ class CosmosReaderBase:
         return RetryPolicy(max_retries=self._opts.max_retries, max_backoff_seconds=self._opts.retry_max_backoff_seconds)
 
     def _log_metrics(self, what: str, started: float, **values: Any) -> None:
-        level = logging.WARNING if self._opts.log_metrics else logging.DEBUG
-        if not logger.isEnabledFor(level):
-            return
-        elapsed = time.monotonic() - started
-        details = " ".join(f"{k}={v:.2f}" if isinstance(v, float) else f"{k}={v}" for k, v in values.items())
-        logger.log(level, "cosmosdb %s finished in %.2fs %s", what, elapsed, details)
+        log_metrics(self._opts, what, started, **values)
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self._opts!r})"
