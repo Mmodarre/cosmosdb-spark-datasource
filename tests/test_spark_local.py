@@ -190,3 +190,37 @@ def test_change_feed_batch_reads_with_a_checkpoint(spark, tmp_path: Path) -> Non
             break
     written = spark.read.parquet(out)
     assert reads >= 3 and written.count() == 120 and written.select("id").distinct().count() == 120
+
+
+def test_change_feed_batch_reads_that_plan_nothing(spark, tmp_path: Path) -> None:
+    from cosmosdb_datasource import commit_batch_checkpoint
+
+    store = _store("spark_cf_empty", partitions=2, docs=30)
+
+    def read(**extra: str) -> list:
+        return spark.read.format("cosmosdb").options(**fake_options(store, **extra)).load().collect()
+
+    assert read(change_feed_mode="LatestVersion", start_from="Now") == []
+    assert read(change_feed_mode="AllVersionsAndDeletes") == []
+    avad = str(tmp_path / "avad")
+    assert read(change_feed_mode="AllVersionsAndDeletes", batch_checkpoint_location=avad) == []
+    location = str(tmp_path / "latest")
+    assert len(read(change_feed_mode="LatestVersion", batch_checkpoint_location=location)) == 30
+    assert commit_batch_checkpoint(location)
+    assert read(change_feed_mode="LatestVersion", batch_checkpoint_location=location) == []  # the idle read
+
+
+def test_properties_that_differ_only_in_case(spark) -> None:
+    store = FakeCosmosStore("spark_case", partitions=1).register()
+    store.upsert({"id": "1", "pk": "a", "name": "x"})
+    store.upsert({"id": "2", "pk": "b", "Name": "y"})
+    store.upsert({"id": "3", "pk": "c", "Name": "other", "name": "exact"})
+    inferred = spark.read.format("cosmosdb").options(**fake_options(store, infer_schema="true")).load()
+    assert inferred.columns == ["id", "pk", "name"]
+    assert sorted(tuple(r) for r in inferred.select("id", "Name").collect()) == [
+        ("1", "x"),
+        ("2", "y"),
+        ("3", "exact"),
+    ]
+    declared = spark.read.format("cosmosdb").schema("id STRING, name STRING").options(**fake_options(store)).load()
+    assert sorted(tuple(r) for r in declared.collect()) == [("1", "x"), ("2", "y"), ("3", "exact")]

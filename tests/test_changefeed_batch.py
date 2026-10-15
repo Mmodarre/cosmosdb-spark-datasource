@@ -135,3 +135,43 @@ def test_checkpoint_validation(make_store, tmp_path) -> None:
 def test_batch_change_feed_options_do_not_mix_with_document_reads(make_store, extra: dict[str, str]) -> None:
     with pytest.raises(CosmosConfigError, match=r"end_at|batch_checkpoint_location"):
         make_source(fake_options(make_store(), **extra))
+
+
+def test_a_future_start_from_drops_the_earlier_changes_in_every_read(make_store, tmp_path) -> None:
+    store = make_store(partitions=2)
+    write(store, 0, 10)
+    later = datetime.fromtimestamp(store.clock + 100, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    path = str(tmp_path / "chk")
+    opts = fake_options(store, change_feed_mode="LatestVersion", start_from=later, batch_checkpoint_location=path)
+    assert run_batch(opts)[0] == []
+    commit_batch_checkpoint(path)
+    write(store, 10, 5)  # _ts before start_from
+    rows, parts = run_batch(opts)
+    assert rows == [] and all(getattr(p, "not_before", None) for p in parts if hasattr(p, "start_lsn"))
+    store.clock += 200
+    write(store, 20, 3)  # after start_from
+    commit_batch_checkpoint(path)
+    assert ids(run_batch(opts)[0]) == ["d20", "d21", "d22"]
+
+
+def test_two_jobs_cannot_plan_the_same_read(make_store, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    from cosmosdb_datasource.batch_checkpoint import PlannedRange
+    from cosmosdb_datasource.offsets import Offset, RangeState
+
+    offset = Offset("rid", "LatestVersion", (RangeState("", "FF", 1),))
+    for no_links in (False, True):
+        checkpoint = BatchCheckpoint(str(tmp_path / f"chk{no_links}"))
+        if no_links:
+
+            def link(src, dst):
+                raise PermissionError(1, "Operation not permitted")
+
+            monkeypatch.setattr(os, "link", link)
+        checkpoint.plan(PlannedRange(0, offset, offset, True))
+        with monkeypatch.context() as race, pytest.raises(CosmosOffsetError, match="another job"):
+            race.setattr(os.path, "exists", lambda path: False)  # the other job's file appears after a check
+            checkpoint.plan(PlannedRange(0, offset, offset, False))
+        assert checkpoint.latest().caught_up is True  # the first plan is kept
+        assert sorted(os.listdir(checkpoint._offsets)) == ["0"]

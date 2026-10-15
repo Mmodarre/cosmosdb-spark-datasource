@@ -114,6 +114,7 @@ _FUNCTIONS: dict[str, Callable[..., Any]] = {
     "IS_STRING": lambda x: _kind(x) == "string",
     "IS_NUMBER": lambda x: _kind(x) == "number",
     "IS_BOOL": lambda x: _kind(x) == "bool",
+    "IS_OBJECT": lambda x: _kind(x) == "object",
     "STARTSWITH": _string_function("STARTSWITH"),
     "ENDSWITH": _string_function("ENDSWITH"),
     "CONTAINS": _string_function("CONTAINS"),

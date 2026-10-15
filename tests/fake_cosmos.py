@@ -51,6 +51,10 @@ from tests.fake_query import compile_query
 
 _REGISTRY: dict[str, FakeCosmosStore] = {}
 _LOCK = threading.RLock()
+# A function of the SDK's change-feed package, as far as a traceback tells: azure-cosmos raises its
+# RecursionError from there.
+_SDK_CHANGE_FEED: dict[str, Any] = {"__name__": "azure.cosmos._change_feed.change_feed_fetcher"}
+exec("def fetch_next_block():\n    raise RecursionError('maximum recursion depth exceeded')\n", _SDK_CHANGE_FEED)
 
 
 class FakeHttpError(Exception):
@@ -117,7 +121,7 @@ class FakeCosmosStore:
         self.lag_delta = 0
         self.query_lag_requests = 0  # query pages served by a replica lagging query_lag_delta LSNs
         # change-feed requests for a range that spans a split fail with RecursionError, as azure-cosmos
-        # 4.17.1 did when its unbounded 410 handling kept meeting a gone range
+        # 4.17.1 does when its unbounded 410 handling keeps meeting a gone range
         self.gone_recursion_errors = 0
         self.query_lag_delta = 0
         self.request_count = 0
@@ -522,7 +526,7 @@ class FakeBackend:
             if len(parts) > 1 and store.gone_recursion_errors > 0:
                 store.gone_recursion_errors -= 1
                 store.save()
-                raise RecursionError("maximum recursion depth exceeded")
+                _SDK_CHANGE_FEED["fetch_next_block"]()
             if len(parts) > 1:
                 # Split: like azure-cosmos (handle_feed_range_gone) the child tokens get the FULL
                 # child partition ranges, not intersected with the token's own range.

@@ -322,7 +322,7 @@ events = read_many(wanted, id_column="id", pk_column="deviceId", **conn, contain
 | Option | Default | Description |
 |---|---|---|
 | `change_feed_mode` | `LatestVersion` | `LatestVersion` or `AllVersionsAndDeletes` (requires continuous backup with the all versions and deletes change feed enabled on the account). Set it on every `readStream`: it also selects the change-feed schema. |
-| `start_from` | `Beginning` (LatestVersion), `Now` (AllVersionsAndDeletes) | `Beginning`, `Now` or an ISO-8601 timestamp such as `2026-10-01T00:00:00Z` (no zone means UTC). A timestamp delivers the changes with `_ts` at or after it, to the second; a timestamp in the future starts the stream at the current position and skips the changes made before it. `AllVersionsAndDeletes` supports only `Now`. Used only for a new checkpoint. |
+| `start_from` | `Beginning` (LatestVersion), `Now` (AllVersionsAndDeletes) | `Beginning`, `Now` or an ISO-8601 timestamp such as `2026-10-01T00:00:00Z` (no zone means UTC). A timestamp delivers the changes with `_ts` at or after it, to the second; a timestamp in the future starts the stream at the current position and skips the changes made before it (rejected with `initial_snapshot`, whose snapshot would then miss them). `AllVersionsAndDeletes` supports only `Now`. Used only for a new checkpoint. |
 | `max_items_per_trigger` | unlimited | Budget of change-feed **LSNs** per micro-batch, not a row cap: bulk and transactional-batch writes commit many documents under one LSN. Does not apply to the initial snapshot. See [Per-trigger limits](#per-trigger-limits). |
 | `initial_snapshot` | `false` | Read the whole container in the first micro-batch, then the change feed from the position the stream started at |
 | `initial_snapshot_delay_seconds` | `5` | No snapshot read starts earlier than this after the start position was resolved; protects against replica lag where session tokens do not apply (`ConsistentPrefix`, `Eventual`). `0` disables it. |
@@ -396,7 +396,7 @@ error.
 | number | the IEEE double the service hashes, without a fraction if integral: `123`, `2.5`; `9007199254740993` renders as `9007199254740992`, because the service treats both as one logical partition and reports the double in delete metadata |
 | `true`, `false` | `true`, `false` |
 | JSON `null` | `null` |
-| undefined (the document has no such property) | NULL |
+| undefined (the document has no such property), or an object (the service stores such a document under the undefined key) | NULL |
 | hierarchical key | a compact JSON array of the components, `{}` for an undefined component: `["tenant1",7]`, `["tenant1",{}]` |
 
 JSON null and undefined are different logical partitions on the service, so they render
@@ -420,7 +420,13 @@ events.printSchema()  # id, pk, then every property: seq bigint, device struct<.
   arrays ARRAY. Values of one property merge to the tightest type both fit: BIGINT and DOUBLE give
   DOUBLE, structs merge their fields, arrays their elements, and any other mix (for example a
   number in one document and a string in another) gives STRING, which holds numbers, objects and
-  arrays as JSON text. A property that is null or an empty array in every sample is STRING.
+  arrays as JSON text. A property that is null in every sample is STRING; one that is an empty
+  array in every sample is ARRAY<STRING>.
+- Property names that differ only in case (`name`, `Name`) are one column, named as first seen in
+  the sample, because Spark resolves column names case-insensitively. Each document's value is read
+  as for a declared schema (exact name first). A property whose name equals `pk`, `feed_range`, the
+  raw JSON column or the corrupt-record column in any case is left out, with a WARNING, unless it is
+  the partition key property of a `/pk`-style key.
 - Every column is nullable, and the read converts each document to the inferred types like a
   declared schema. A value of another type in a document outside the sample is null, or handled
   as `mode` says.
@@ -441,7 +447,10 @@ With `.schema(...)` each column is resolved as follows:
   MAP it holds the parsed document. Change-feed streams also have `id`, `_ts`, `operation`, `lsn`,
   `lsn_seq`, `crts` and `ttl_expired`; snapshot streams have `snapshot_ts`.
 - **Every other column** is a top-level document property, matched by exact name, then
-  case-insensitively. STRUCT, ARRAY and MAP types are converted recursively.
+  case-insensitively (the first such property in the document). Two columns whose names differ only
+  in case, such as `name` and `Name`, are each matched by exact name only, so neither reads the
+  other's property. Struct fields are matched the same way. STRUCT, ARRAY and MAP types are
+  converted recursively.
 - **Missing properties** are null.
 
 If documents have a property called `body`, set `raw_json_column` to another name.
@@ -458,8 +467,8 @@ Conversions are safe: a value that cannot be represented exactly is an error, ne
 |---|---|
 | STRING | any value (objects and arrays as compact JSON; booleans as `true`/`false`) |
 | BOOLEAN | `true`/`false`, `"true"`/`"false"` (any case), `0`/`1` |
-| TINYINT to BIGINT | integers, integral floats (`42.0`), integer strings; range-checked |
-| FLOAT, DOUBLE | numbers and numeric strings |
+| TINYINT to BIGINT | integers, integral floats (`42.0`), numeric strings with an integral value (`"42"`, `"4.2e1"`); range-checked |
+| FLOAT, DOUBLE | numbers and numeric strings, and `"NaN"`, `"Infinity"`, `"-Infinity"` (any case, as Spark's `CAST`) |
 | DECIMAL(p,s) | numbers and numeric strings, rounded half-up to `s`; precision-checked |
 | TIMESTAMP | ISO-8601 strings (7-digit .NET fractions accepted; no zone means UTC), or epoch seconds, milliseconds or microseconds (chosen by magnitude) |
 | TIMESTAMP_NTZ | as TIMESTAMP, keeping the wall-clock time |
@@ -467,6 +476,10 @@ Conversions are safe: a value that cannot be represented exactly is an error, ne
 | BINARY | base64 strings |
 | ARRAY, MAP, STRUCT | JSON arrays and objects, recursively |
 | VARIANT, intervals | not supported: read as STRING and use `parse_json()` or `from_json()` |
+
+Numeric strings are ASCII digits with an optional sign, decimal point and exponent, surrounded by
+optional whitespace. Like Spark's `CAST`, other digits (`"١٢"`) and separators (`"1_000"`) are not
+numbers.
 
 On a conversion failure, `PERMISSIVE` sets the field to null and puts the document JSON into the
 corrupt-record column (if it is in the schema), `DROPMALFORMED` skips the row, and `FAILFAST`
@@ -580,9 +593,12 @@ Entra ID works.
   proportion to their backlog, and `trigger(availableNow=True)` runs a single micro-batch per run.
   With `initial_snapshot`, the first run's single batch is the snapshot. For AvailableNow jobs on
   these runtimes, leave `max_items_per_trigger` unset so that each run reads the whole backlog, or
-  bound the micro-batches with a `processingTime` trigger instead. Do not combine
-  `max_items_per_trigger` with the internal conf
-  `spark.sql.streaming.triggerAvailableNowWrapper.enabled=true` on these runtimes.
+  bound the micro-batches with a `processingTime` trigger instead.
+- The internal, unset by default Spark conf `spark.sql.streaming.triggerAvailableNowWrapper.enabled`
+  is not supported (it was unset on every Databricks runtime tested). On PySpark 4.0 and 4.1 it makes
+  Spark ask a restarted stream for its end offset before it passes the checkpoint's offset, so a
+  run would read from a newly resolved start; such a restart fails with an error that names the
+  conf. Only streams where someone set the conf are affected.
 - **OSS PySpark 4.2, classic DBR 18 and later, serverless (environment versions 2 to 5) and SDP**
   use admission control (`ReadMaxRows`) and native `Trigger.AvailableNow`: one run makes several
   capped micro-batches up to the position captured at its start, then stops. With
@@ -715,8 +731,11 @@ snapshots = spark.readStream.format("cosmosdb").options(**conn, container="custo
 - `throughput_bucket=N` sends every request in bucket N; the service caps the bucket at the share
   of the container's throughput configured for it, across every client that uses the bucket.
 - `target_ru_per_second` caps one read. Planning splits the budget evenly over the read's tasks;
-  the tasks on one executor share a token bucket (a file under the temp directory, locked with
-  `flock`) charged with each page's request charge, and sleep while it is in debt. A read stays at
+  the tasks on one executor share a token bucket (a file in a directory of the temp directory
+  that only the Spark user can open, locked with `flock`), charged with the request charge of
+  every page and point-read request, and sleep while it is in debt. A task charges one bucket for
+  its whole read. Where the files cannot be locked (no `flock`, or `ENOLCK` on a network file
+  system), the tasks in one Python worker share a bucket, and a WARNING says so. A read stays at
   or below the budget however its tasks are spread, and tasks on one executor use each other's
   unused share; tasks that run in later waves get their share only then. Measured on an account:
   a 1,601 RU read capped at 20 RU/s ran at 18.8 RU/s (85 s; 11.6 s unthrottled).
@@ -855,6 +874,7 @@ throughput for that.
 | `did not reach LSN ... within 120s` | A replica lagged for a long time; Spark retries the task. Increase `change_feed_end_wait_seconds` or use stronger consistency. |
 | HTTP 404 with sub-status 1002, retried while reading the initial snapshot | No replica had caught up with the recorded session token yet; it is retried with backoff (`max_retries`). Persistent failures mean the replicas lag longer than the retry budget. |
 | `initial_snapshot=true, but the first micro-batch of this checkpoint was planned without a snapshot` | The checkpoint's first batch was planned without the option; use a new checkpoint location to read a snapshot |
+| `Spark asked for the latest offset before it passed the checkpoint's offset` | `spark.sql.streaming.triggerAvailableNowWrapper.enabled=true` is set (PySpark 4.0/4.1, DBR 15.4 to 17.3); remove it |
 | `Spark called getDefaultReadLimit() ... no SupportsTriggerAvailableNow class was found` | The engine uses the PySpark 4.2 protocol, but no AvailableNow mixin was found at import, so `Trigger.AvailableNow` may run one micro-batch per trigger. Report the modules listed in the message. |
 | HTTP 429 after retries | Too little RU for the parallelism: raise throughput or `throttle_max_wait_seconds`, reduce `partitions_per_feed_range`, or use `priority=Low` |
 | `azure-identity is required` | Install `azure-identity` or the `identity` extra |

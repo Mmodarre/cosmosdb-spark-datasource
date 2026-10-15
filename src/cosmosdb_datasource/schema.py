@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import collections
 import json
 import re
 from collections.abc import Callable, Mapping
@@ -109,8 +110,16 @@ _INT_RANGES = {
 _ISO_RE = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})"
     r"(?:[Tt ](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?)?"
-    r"\s*(Z|z|[+-]\d{2}(?::?\d{2})?)?$"
+    r"\s*(Z|z|[+-]\d{2}(?::?\d{2})?)?$",
+    re.ASCII,
 )
+# Numeric text: ASCII digits with an optional sign, fraction and exponent. Python's int(), float() and
+# Decimal() also accept other Unicode digits and "1_000", which Spark's CAST does not.
+_NUMBER_RE = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?", re.ASCII)
+_INTEGER_RE = re.compile(r"[+-]?\d+", re.ASCII)
+# The non-finite values Spark's CAST to DOUBLE accepts, in any case.
+_NON_FINITE = frozenset({"nan", "+nan", "-nan", "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity"})
+_ASCII_SPACE = " \t\n\r\x0b\x0c"
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
@@ -151,16 +160,18 @@ def _int_converter(lo: int, hi: int) -> Callable[[Any], int]:
                 raise _ConversionFailure("non-integral number for an integer type")
             out = int(value)
         elif isinstance(value, str):
-            try:
-                out = int(value.strip())
-            except ValueError:
-                try:
-                    as_float = float(value.strip())
-                except ValueError:
-                    raise _ConversionFailure("string is not an integer") from None
-                if not as_float.is_integer():
-                    raise _ConversionFailure("non-integral number for an integer type") from None
-                out = int(as_float)
+            text = value.strip(_ASCII_SPACE)
+            if _INTEGER_RE.fullmatch(text):
+                out = int(text)
+            elif _NUMBER_RE.fullmatch(text):
+                as_decimal = Decimal(text)
+                if as_decimal != as_decimal.to_integral_value():
+                    raise _ConversionFailure("non-integral number for an integer type")
+                if not lo <= as_decimal <= hi:  # before int(): "1e999999999" has a billion digits
+                    raise _ConversionFailure("integer out of range")
+                out = int(as_decimal)
+            else:
+                raise _ConversionFailure("string is not an integer")
         else:
             raise _ConversionFailure(f"cannot convert {_type_name(value)} to an integer type")
         if not lo <= out <= hi:
@@ -176,10 +187,10 @@ def _to_float(value: Any) -> float:
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
-        try:
-            return float(value.strip())
-        except ValueError:
-            raise _ConversionFailure("string is not a number") from None
+        text = value.strip(_ASCII_SPACE)
+        if _NUMBER_RE.fullmatch(text) or text.lower() in _NON_FINITE:
+            return float(text)
+        raise _ConversionFailure("string is not a number")
     raise _ConversionFailure(f"cannot convert {_type_name(value)} to a floating point type")
 
 
@@ -192,8 +203,11 @@ def _decimal_converter(dt: DecimalType) -> Callable[[Any], Decimal]:
     def convert(value: Any) -> Decimal:
         if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
             raise _ConversionFailure(f"cannot convert {_type_name(value)} to decimal")
+        text = value.strip(_ASCII_SPACE) if isinstance(value, str) else str(value)
+        if isinstance(value, str) and not _NUMBER_RE.fullmatch(text):
+            raise _ConversionFailure("value is not a decimal number")
         try:
-            parsed = Decimal(str(value).strip())
+            parsed = Decimal(text)
         except (InvalidOperation, ValueError):
             raise _ConversionFailure("value is not a decimal number") from None
         if not parsed.is_finite():
@@ -294,18 +308,25 @@ def _to_binary(value: Any) -> bytes:
     raise _ConversionFailure(f"cannot convert {_type_name(value)} to binary")
 
 
-def _lookup(doc: Mapping[str, Any], name: str) -> Any:
+def _lookup(doc: Mapping[str, Any], name: str, fallback: bool = True) -> Any:
     if name in doc:
         return doc[name]
-    return _lookup_case_insensitive(doc, name)
+    return _lookup_case_insensitive(doc, name) if fallback else None
 
 
 def _lookup_case_insensitive(doc: Mapping[str, Any], name: str) -> Any:
+    """Return the value of the first property, in document order, whose name equals ``name`` in any case."""
     lowered = name.lower()
     for key, value in doc.items():
         if isinstance(key, str) and key.lower() == lowered:
             return value
     return None
+
+
+def _unique_ignoring_case(names: list[str]) -> list[bool]:
+    """For each name, whether no other name equals it in another case (only those fall back to any case)."""
+    counts = collections.Counter(n.lower() for n in names)
+    return [counts[n.lower()] == 1 for n in names]
 
 
 def _null_checked(inner: Callable[[Any], Any], nullable: bool) -> Callable[[Any], Any]:
@@ -393,14 +414,13 @@ def _build_non_null_converter(dt: DataType) -> Callable[[Any], Any]:
 
         return convert_map
     if isinstance(dt, StructType):
-        fields = [(f.name, build_converter(f.dataType, f.nullable)) for f in dt.fields]
+        unique = _unique_ignoring_case(dt.fieldNames())
+        fields = [(f.name, build_converter(f.dataType, f.nullable), u) for f, u in zip(dt.fields, unique, strict=True)]
 
         def convert_struct(value: Any) -> tuple[Any, ...]:
             if value.__class__ is not dict and not isinstance(value, Mapping):
                 raise _ConversionFailure(f"cannot convert {_type_name(value)} to struct")
-            return tuple(
-                [conv(value[name] if name in value else _lookup_case_insensitive(value, name)) for name, conv in fields]
-            )
+            return tuple([conv(_lookup(value, name, fallback)) for name, conv, fallback in fields])
 
         return convert_struct
     raise CosmosConfigError(
@@ -457,12 +477,12 @@ class RecordView:
 _Getter = Callable[[RecordView], Any]
 
 
-def _doc_getter(name: str) -> _Getter:
+def _doc_getter(name: str, fallback: bool) -> _Getter:
     def get(view: RecordView) -> Any:
         doc = view.doc
         if doc.__class__ is dict:  # skips the slow Mapping ABC check for what the SDK returns
-            return doc[name] if name in doc else _lookup_case_insensitive(doc, name)
-        return _lookup(doc, name) if isinstance(doc, Mapping) else None
+            return doc[name] if name in doc else (_lookup_case_insensitive(doc, name) if fallback else None)
+        return _lookup(doc, name, fallback) if isinstance(doc, Mapping) else None
 
     return get
 
@@ -483,6 +503,8 @@ class RowBuilder:
         self.parse_mode = parse_mode
         self.corrupt_index: int | None = None
         self._fields: list[tuple[str, _Getter, Callable[[Any], Any]] | None] = []
+        # A column whose name another column has in another case reads only the property of its exact name.
+        unique = _unique_ignoring_case(schema.fieldNames())
         for index, f in enumerate(schema.fields):
             name = f.name
             if name == corrupt_column:
@@ -503,7 +525,7 @@ class RowBuilder:
             elif stream and name in STREAM_METADATA_COLUMNS:
                 getter = _STREAM_GETTERS[name]
             else:
-                getter = _doc_getter(name)
+                getter = _doc_getter(name, unique[index])
             if name == raw_column and isinstance(f.dataType, StringType):
                 conv: Callable[[Any], Any] = _null_checked(dumps, f.nullable)
             else:

@@ -38,13 +38,18 @@ import logging
 import time
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 from pyspark.sql.datasource import DataSourceStreamReader, InputPartition
 from pyspark.sql.types import StructType
 
 from cosmosdb_datasource import _compat, client, epk, retry
-from cosmosdb_datasource._base import CosmosReaderBase
+from cosmosdb_datasource._base import (
+    AVAILABLE_NOW_WRAPPER_UNSUPPORTED,
+    CosmosReaderBase,
+    is_empty_partition,
+    unexpected_partition,
+)
 from cosmosdb_datasource.auth import SecretToken
 from cosmosdb_datasource.batch import CosmosQueryPartition, QueryStats, query_documents, split_feed_ranges
 from cosmosdb_datasource.changefeed import ReadStats, build_composite_continuation, read_bounded, split_positions
@@ -174,6 +179,8 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         self._target_refreshed = False  # AvailableNow target moved past the initial snapshot (once per run)
         self._reported: Offset | None = None
         self._resolved_at: float | None = None  # monotonic time this process resolved the initial offset
+        self._initial_requested = False  # Spark called initialOffset()
+        self._latest_from_initial = False  # latestOffset() without arguments started from a resolved start
 
     def _context(self) -> tuple[Any, SecretToken | None, str, PartitionKeyInfo]:
         token = self._driver_token()
@@ -212,6 +219,10 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         return None
 
     def initialOffset(self) -> dict:
+        self._initial_requested = True
+        return self._initial_offset()
+
+    def _initial_offset(self) -> dict:
         # Cached: on PySpark 4.0/4.1 a brand-new query calls latestOffset() first (which needs the
         # start) and initialOffset() later when building the batch; both must see the same start.
         if self._initial is None:
@@ -269,7 +280,8 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
                 # PySpark 4.0/4.1 on a brand-new query (no checkpoint): latestOffset() is called
                 # before initialOffset() (MicroBatchExecution.constructNextBatch). On a restart
                 # setLatestSeenOffset -> partitions(offset, offset) has already set the start.
-                self.initialOffset()
+                self._initial_offset()
+                self._latest_from_initial = True
             base = self._known
         assert base is not None
         backend, _token, rid, _pk = self._context()
@@ -331,6 +343,8 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
 
     def partitions(self, start: dict, end: dict) -> list[CosmosChangeFeedPartition | CosmosSnapshotPartition]:
         end_offset = Offset.from_dict(end)
+        if start == end and self._latest_from_initial and not self._initial_requested:
+            raise CosmosConfigError(AVAILABLE_NOW_WRAPPER_UNSUPPORTED)
         self._known = end_offset
         if start == end:
             return []
@@ -426,117 +440,119 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
             retry.sleep(remaining)
 
     def read(self, partition: InputPartition | None) -> Iterator[tuple[Any, ...]]:
-        if partition is None:
+        if is_empty_partition(partition):
             return
         if isinstance(partition, CosmosSnapshotPartition):
             yield from self._read_snapshot(partition)
             return
-        partition = cast(CosmosChangeFeedPartition, partition)
+        if not isinstance(partition, CosmosChangeFeedPartition):
+            raise unexpected_partition(partition)
         started = time.monotonic()
         opts = self._opts
         mode = opts.change_feed_mode
-        backend = self._backend(partition.token, partition)
-        builder = self._row_builder()
-        pk = partition.pk
-        rng = (partition.lo, partition.hi)
-        stats = ReadStats()
-        describe = f"range {epk.range_key(*rng)} LSN ({partition.start_lsn}, {partition.end_lsn}]"
+        with self._task_backend(partition.token, partition) as backend:
+            builder = self._row_builder()
+            pk = partition.pk
+            rng = (partition.lo, partition.hi)
+            stats = ReadStats()
+            describe = f"range {epk.range_key(*rng)} LSN ({partition.start_lsn}, {partition.end_lsn}]"
 
-        def open_pages(resume: str | None) -> Iterator[Any]:
-            return backend.change_feed_pages(
-                rng, mode, partition.start_lsn, opts.page_size, resume, container_rid=partition.rid
+            def open_pages(resume: str | None) -> Iterator[Any]:
+                return backend.change_feed_pages(
+                    rng, mode, partition.start_lsn, opts.page_size, resume, container_rid=partition.rid
+                )
+
+            items = read_bounded(
+                open_pages,
+                start_lsn=partition.start_lsn,
+                end_lsn=partition.end_lsn,
+                mode=mode,
+                policy=self._retry_policy(),
+                end_wait_seconds=opts.change_feed_end_wait_seconds,
+                stats=stats,
+                describe=describe,
+                lo=partition.lo,
+                hi=partition.hi,
+                rebuild_token=lambda children: build_composite_continuation(
+                    partition.rid, mode, partition.lo, partition.hi, children
+                ),
+                replan=lambda positions: build_composite_continuation(
+                    partition.rid,
+                    mode,
+                    partition.lo,
+                    partition.hi,
+                    split_positions(positions, backend.feed_ranges(force_refresh=True), partition.lo, partition.hi),
+                ),
             )
-
-        items = read_bounded(
-            open_pages,
-            start_lsn=partition.start_lsn,
-            end_lsn=partition.end_lsn,
-            mode=mode,
-            policy=self._retry_policy(),
-            end_wait_seconds=opts.change_feed_end_wait_seconds,
-            stats=stats,
-            describe=describe,
-            lo=partition.lo,
-            hi=partition.hi,
-            rebuild_token=lambda children: build_composite_continuation(
-                partition.rid, mode, partition.lo, partition.hi, children
-            ),
-            replan=lambda positions: build_composite_continuation(
-                partition.rid,
-                mode,
-                partition.lo,
-                partition.hi,
-                split_positions(positions, backend.feed_ranges(force_refresh=True), partition.lo, partition.hi),
-            ),
-        )
-        emitted = 0
-        skipped_before_start = 0
-        group_lsn: int | None = None
-        group: collections.Counter[tuple[str | None, str | None]] = collections.Counter()
-        for item in items:
-            rec = to_change_record(item, mode, pk)
-            # The feed is in LSN order and a page holds whole LSN groups, so the versions of a document
-            # at one LSN are adjacent; pages of other partitions after a split hold other documents.
-            if rec.lsn != group_lsn:
-                group_lsn = rec.lsn
-                group.clear()
-            rec.lsn_seq = group[(rec.pk, rec.id)]
-            group[(rec.pk, rec.id)] += 1
-            # A start_from later than the position the stream started at: the service has no position for
-            # a future time, so the stream starts at "now" and the earlier changes are dropped here.
-            if partition.not_before is not None and rec.ts is not None and rec.ts < partition.not_before:
-                skipped_before_start += 1
-                continue
-            row = builder.build(_view(rec, partition.feed_range))
-            if row is not None:
-                emitted += 1
-                yield row
-        self._log_metrics(
-            f"change feed read of {describe}",
-            started,
-            rows=emitted,
-            pages=stats.pages,
-            request_charge=stats.request_charge,
-            retries=stats.retries,
-            lag_waits=stats.lag_waits,
-            skipped_beyond_end=stats.skipped_beyond_end,
-            skipped_before_start=skipped_before_start,
-        )
+            emitted = 0
+            skipped_before_start = 0
+            group_lsn: int | None = None
+            group: collections.Counter[tuple[str | None, str | None]] = collections.Counter()
+            for item in items:
+                rec = to_change_record(item, mode, pk)
+                # The feed is in LSN order and a page holds whole LSN groups, so the versions of a document
+                # at one LSN are adjacent; pages of other partitions after a split hold other documents.
+                if rec.lsn != group_lsn:
+                    group_lsn = rec.lsn
+                    group.clear()
+                rec.lsn_seq = group[(rec.pk, rec.id)]
+                group[(rec.pk, rec.id)] += 1
+                # A start_from later than the position the stream started at: the service has no position for
+                # a future time, so the stream starts at "now" and the earlier changes are dropped here.
+                if partition.not_before is not None and rec.ts is not None and rec.ts < partition.not_before:
+                    skipped_before_start += 1
+                    continue
+                row = builder.build(_view(rec, partition.feed_range))
+                if row is not None:
+                    emitted += 1
+                    yield row
+            self._log_metrics(
+                f"change feed read of {describe}",
+                started,
+                rows=emitted,
+                pages=stats.pages,
+                request_charge=stats.request_charge,
+                retries=stats.retries,
+                lag_waits=stats.lag_waits,
+                skipped_beyond_end=stats.skipped_beyond_end,
+                skipped_before_start=skipped_before_start,
+            )
 
     def _read_snapshot(self, partition: CosmosSnapshotPartition) -> Iterator[tuple[Any, ...]]:
         started = time.monotonic()
         builder = self._row_builder()
         stats = QueryStats()
         describe = f"range {epk.range_key(partition.lo, partition.hi)}"
-        docs = query_documents(
-            self._backend(partition.token, partition),
-            SNAPSHOT_QUERY,
-            None,
-            (partition.lo, partition.hi),
-            self._opts.page_size,
-            policy=self._retry_policy(),
-            stats=stats,
-            describe=f"the initial snapshot of {describe}",
-            session_token=partition.session_token,
-            pk=partition.pk,
-        )
-        rows = 0
-        for doc in docs:
-            row = builder.build(_view(to_snapshot_record(doc, partition.pk), partition.feed_range))
-            if row is not None:
-                rows += 1
-                yield row
-        self._log_metrics(
-            f"initial snapshot read of {describe}",
-            started,
-            rows=rows,
-            pages=stats.pages,
-            request_charge=stats.request_charge,
-            retries=stats.retries,
-            replans=stats.replans,
-            duplicates=stats.duplicates,
-            session_token=partition.session_token is not None,
-        )
+        with self._task_backend(partition.token, partition) as backend:
+            docs = query_documents(
+                backend,
+                SNAPSHOT_QUERY,
+                None,
+                (partition.lo, partition.hi),
+                self._opts.page_size,
+                policy=self._retry_policy(),
+                stats=stats,
+                describe=f"the initial snapshot of {describe}",
+                session_token=partition.session_token,
+                pk=partition.pk,
+            )
+            rows = 0
+            for doc in docs:
+                row = builder.build(_view(to_snapshot_record(doc, partition.pk), partition.feed_range))
+                if row is not None:
+                    rows += 1
+                    yield row
+            self._log_metrics(
+                f"initial snapshot read of {describe}",
+                started,
+                rows=rows,
+                pages=stats.pages,
+                request_charge=stats.request_charge,
+                retries=stats.retries,
+                replans=stats.replans,
+                duplicates=stats.duplicates,
+                session_token=partition.session_token is not None,
+            )
 
     def commit(self, end: dict) -> None:
         if self._known is None:

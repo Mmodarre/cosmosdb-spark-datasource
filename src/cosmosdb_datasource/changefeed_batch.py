@@ -32,7 +32,7 @@ from pyspark.sql.datasource import DataSourceReader, InputPartition
 from pyspark.sql.types import StructType
 
 from cosmosdb_datasource import epk
-from cosmosdb_datasource._base import CosmosReaderBase
+from cosmosdb_datasource._base import CosmosReaderBase, is_empty_partition, planned
 from cosmosdb_datasource.batch_checkpoint import BatchCheckpoint, PlannedRange
 from cosmosdb_datasource.offsets import Offset, RangeState, rekey
 from cosmosdb_datasource.options import MODE_LATEST_VERSION, CosmosOptions, parse_timestamp_option
@@ -52,17 +52,19 @@ class CosmosChangeFeedBatchReader(CosmosReaderBase, DataSourceReader):
         latest = checkpoint.latest() if checkpoint is not None else None
         if checkpoint is not None and latest is not None and not checkpoint.committed(latest.index):
             logger.info("cosmosdb change-feed batch read: reading the uncommitted range offsets/%d again", latest.index)
-            planned = latest
+            planned_range = latest
         else:
             start = latest.end if latest is not None else Offset.from_dict(self._feed.initialOffset())
-            planned = self._plan(start, latest.index + 1 if latest is not None else 0)
+            planned_range = self._plan(start, latest.index + 1 if latest is not None else 0)
             if checkpoint is not None:
-                checkpoint.plan(planned)
-        parts = self._feed.partitions(planned.start.to_dict(), planned.end.to_dict())
+                checkpoint.plan(planned_range)
+        parts = self._feed.partitions(planned_range.start.to_dict(), planned_range.end.to_dict())
         logger.info(
-            "cosmosdb change-feed batch read planned: %d partition(s), caught_up=%s", len(parts), planned.caught_up
+            "cosmosdb change-feed batch read planned: %d partition(s), caught_up=%s",
+            len(parts),
+            planned_range.caught_up,
         )
-        return list(parts)
+        return planned(parts)
 
     def _plan(self, start: Offset, index: int) -> PlannedRange:
         feed = self._feed
@@ -83,6 +85,7 @@ class CosmosChangeFeedBatchReader(CosmosReaderBase, DataSourceReader):
             start.mode,
             tuple(RangeState(lo, hi, e) for (lo, hi), e in zip(ranges, ends, strict=True)),
             init=start.ranges if start.initial else None,
+            not_before=start.not_before,
         )
         return PlannedRange(index, start, end, caught_up)
 
@@ -92,6 +95,6 @@ class CosmosChangeFeedBatchReader(CosmosReaderBase, DataSourceReader):
         return int(lsn)
 
     def read(self, partition: InputPartition | None) -> Iterator[tuple[Any, ...]]:
-        if partition is None:
+        if is_empty_partition(partition):
             return iter(())
         return self._feed.read(partition)

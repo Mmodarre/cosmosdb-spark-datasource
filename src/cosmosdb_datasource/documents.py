@@ -10,7 +10,8 @@ partition key of AllVersionsAndDeletes delete metadata, so the rows of one docum
 * a hierarchical key is a compact JSON array of its components;
 * an undefined key (the document lacks the property) is NULL; an undefined component of a
   hierarchical key is ``{}``, Cosmos DB's own encoding of an undefined key. JSON null and undefined
-  are different logical partitions on the service.
+  are different logical partitions on the service. An object is not a partition key value: the
+  service stores such a document under the undefined key, so an object renders as undefined too.
 """
 
 from __future__ import annotations
@@ -96,6 +97,7 @@ def render_partition_key(components: list[Any], hierarchical: bool) -> str | Non
     """Render partition key components (``UNDEFINED`` for missing ones) as the ``pk`` column text."""
     if not components:
         return None
+    components = [UNDEFINED if isinstance(c, Mapping) else c for c in components]
     if hierarchical:
         return _json([_canonical(c) for c in components])
     value = components[0]

@@ -235,3 +235,59 @@ def test_read_items_runs_its_queries_one_at_a_time() -> None:
 
     docs, charge = SdkBackend(Container()).read_items([("a", "p")])
     assert docs == [{"id": "a"}] and charge == 3.0 and calls[0]["max_concurrency"] == 1
+
+
+def test_the_topology_check_of_a_query_read_runs_under_the_client_lock() -> None:
+    """The routing map can be empty after the SDK handled a split; reading it then sends a request."""
+    active: list[str] = []
+    overlaps: list[tuple[str, tuple[str, ...]]] = []
+    guard = threading.Lock()
+
+    class InFlight:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def __enter__(self) -> None:
+            with guard:
+                if active:
+                    overlaps.append((self.name, tuple(active)))
+                active.append(self.name)
+
+        def __exit__(self, *exc: object) -> None:
+            with guard:
+                active.remove(self.name)
+
+    class Pager:
+        def __init__(self, hook):
+            self.hook = hook
+
+        def by_page(self, continuation_token=None):
+            for i in range(6):
+                with InFlight("query page"):
+                    time.sleep(0.02)
+                    self.hook({"x-ms-documentdb-partitionkeyrangeid": "0", "x-ms-continuation": f"c{i}"}, None)
+                yield iter([{"id": f"d{i}", "pk": "p"}])
+
+    class Container:
+        def read_feed_ranges(self, force_refresh=False):
+            with InFlight("partition key ranges"):  # a cold routing-map cache
+                time.sleep(0.01)
+            return [{"Range": {"min": "", "max": "FF"}}]
+
+        def query_items(self, query, max_item_count, response_hook, **kwargs):
+            return Pager(response_hook)
+
+    backend = SdkBackend(Container(), prefetch_pages=1)
+    docs = list(
+        query_documents(
+            backend,
+            "SELECT * FROM c",
+            None,
+            ("", "FF"),
+            10,
+            policy=retry.RetryPolicy(),
+            stats=QueryStats(),
+            describe="test",
+        )
+    )
+    assert len(docs) == 6 and overlaps == []

@@ -127,6 +127,9 @@ class FakeContainer:
     def query_items(self, *, response_hook: Any, **kwargs: Any) -> FakePager:
         return FakePager(self.pages, response_hook, self.threads)
 
+    def read_feed_ranges(self, force_refresh: bool = False) -> list[dict[str, Any]]:
+        return [{"Range": {"min": "", "max": "FF"}}]
+
 
 @pytest.mark.parametrize("prefetch", [0, 1, 2])
 def test_sdk_backend_pages_are_the_same_with_read_ahead(prefetch: int) -> None:
