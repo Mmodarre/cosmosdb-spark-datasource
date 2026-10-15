@@ -34,7 +34,7 @@ from typing import Any
 from pyspark.sql.datasource import DataSourceStreamReader, InputPartition
 from pyspark.sql.types import StructType
 
-from cosmosdb_datasource import _compat, client, epk
+from cosmosdb_datasource import _compat, epk
 from cosmosdb_datasource._base import (
     AVAILABLE_NOW_WRAPPER_UNSUPPORTED,
     CosmosReaderBase,
@@ -90,6 +90,8 @@ class CosmosSnapshotStreamPartition(CosmosQueryPartition):
 
 
 class CosmosSnapshotStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNowBase):
+    _holds_client = True
+
     def __init__(self, opts: CosmosOptions, schema: StructType) -> None:
         super().__init__(opts, schema, stream=False)  # rows are documents, as in batch reads
         if SNAPSHOT_TS_COLUMN not in self._schema.fieldNames():
@@ -270,7 +272,7 @@ class CosmosSnapshotStreamReader(CosmosReaderBase, DataSourceStreamReader, _Avai
             self._known = SnapshotStreamOffset.from_dict(end)
 
     def stop(self) -> None:
-        client.close_all()
+        self._release_client()
 
     def _container_rid(self) -> str:
         backend = self._driver_backend(self._driver_token())

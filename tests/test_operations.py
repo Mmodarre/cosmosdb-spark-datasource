@@ -73,6 +73,18 @@ def test_certificate_credential_is_built_from_the_option() -> None:
     assert isinstance(credential, CertificateCredential)
 
 
+def test_a_line_wrapped_certificate_is_accepted() -> None:
+    pytest.importorskip("azure.identity")
+    from azure.identity import CertificateCredential
+
+    pem = self_signed_pem()
+    encoded = base64.b64encode(pem).decode()
+    wrapped = "\n".join(encoded[i : i + 76] for i in range(0, len(encoded), 76)) + "\n"  # GNU base64, openssl
+    opts = parse_options({**BASE, "tenant_id": "t", "client_id": "c", "client_certificate": f"  {wrapped}"})
+    assert opts.auth.client_certificate == encoded
+    assert isinstance(auth.build_token_credential(opts.auth), CertificateCredential)
+
+
 def test_certificate_rotation_builds_a_new_driver_credential(monkeypatch: pytest.MonkeyPatch) -> None:
     built: list[Any] = []
 

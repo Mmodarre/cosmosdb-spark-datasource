@@ -45,6 +45,7 @@ class CosmosChangeFeedBatchReader(CosmosReaderBase, DataSourceReader):
     def __init__(self, opts: CosmosOptions, schema: StructType) -> None:
         super().__init__(opts, schema, stream=True)
         self._feed = CosmosStreamReader(opts, schema)
+        self._feed._holds_client = False  # a batch read has no stop(): the client stays cached
 
     def partitions(self) -> list[InputPartition]:
         opts = self._opts

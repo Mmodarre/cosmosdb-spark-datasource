@@ -35,19 +35,21 @@ env:
   FORCE_COLOR: "1"
 
 jobs:
-  emulator:
-    name: Emulator (${{ matrix.emulator }})
+  # One job per emulator, each with a leg per azure-cosmos version: the lowest that pyproject.toml allows
+  # and the latest 4.x. The two aggregate jobs below carry the check names that the main branch requires.
+  emulator-vnext:
+    name: Emulator (vnext, azure-cosmos ${{ matrix.azure-cosmos }})
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        emulator: [vnext, legacy]
+        azure-cosmos: [minimum, latest]
     env:
       COSMOS_ENDPOINT: https://localhost:8081/
-      COSMOS_EMULATOR: ${{ matrix.emulator }}
+      COSMOS_EMULATOR: vnext
       SPARK_LOCAL_IP: 127.0.0.1
-    steps:
+    steps: &emulator-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -55,14 +57,13 @@ jobs:
       # them); the legacy emulator accepts the key it is started with, here a random one per run.
       - name: Start the emulator
         env:
-          EMULATOR: ${{ matrix.emulator }}
           VNEXT: ${{ inputs.vnext-image || env.VNEXT_IMAGE }}
           LEGACY: ${{ inputs.legacy-image || env.LEGACY_IMAGE }}
         run: |
           key="$(openssl rand -base64 64 | tr -d '\n')"
           echo "::add-mask::$key"
           echo "COSMOS_KEY=$key" >> "$GITHUB_ENV"
-          if [ "$EMULATOR" = vnext ]; then
+          if [ "$COSMOS_EMULATOR" = vnext ]; then
             docker run --detach --name cosmos-emulator --publish 8081:8081 --publish 8080:8080 \
               --env PROTOCOL=https --env ENABLE_EXPLORER=false --env ENABLE_TELEMETRY=false "$VNEXT"
             echo "READY_URL=http://localhost:8080/ready" >> "$GITHUB_ENV"
@@ -85,6 +86,20 @@ jobs:
           enable-cache: true
       - name: Install the locked environment
         run: uv sync --frozen
+      - name: Select the azure-cosmos version under test
+        env:
+          COSMOS_LEG: ${{ matrix.azure-cosmos }}
+        run: |
+          compile() { uv pip compile pyproject.toml --no-deps --no-header --no-annotate --quiet "$@" | grep '^azure-cosmos=='; }
+          case "$COSMOS_LEG" in
+            minimum) echo "COSMOS_REQ=$(compile --resolution lowest-direct)" >> "$GITHUB_ENV" ;;
+            latest) echo "COSMOS_REQ=$(compile)" >> "$GITHUB_ENV" ;;
+            *) echo "unknown azure-cosmos leg: $COSMOS_LEG" >&2; exit 1 ;;
+          esac
+      - name: Show and verify the version under test
+        run: |
+          uv run --no-sync --with "$COSMOS_REQ" python -c \
+            'import os, azure.cosmos as c; print("azure-cosmos", c.__version__); assert c.__version__ == os.environ["COSMOS_REQ"].partition("==")[2]'
       - name: Wait for the emulator
         run: |
           for _ in $(seq 1 120); do
@@ -97,16 +112,56 @@ jobs:
           echo "the emulator did not become ready" >&2
           exit 1
       - name: Run the integration tests
-        run: uv run --frozen python -m pytest -m integration -ra --junitxml=junit-emulator.xml
+        run: uv run --no-sync --with "$COSMOS_REQ" python -m pytest -m integration -ra --junitxml=junit-emulator.xml
       - name: Check that only tests needing unsupported capabilities were skipped
-        env:
-          EMULATOR: ${{ matrix.emulator }}
         run: |
-          uv run --frozen python .github/scripts/check_junit.py junit-emulator.xml tests.test_integration \
-            --allow-skip "the $EMULATOR emulator does not support"
+          uv run --no-sync python .github/scripts/check_junit.py junit-emulator.xml tests.test_integration \
+            --allow-skip "the $COSMOS_EMULATOR emulator does not support"
       - name: Emulator logs
         if: ${{ failure() }}
         run: docker logs cosmos-emulator 2>&1 | tail -n 300
+
+  emulator-legacy:
+    name: Emulator (legacy, azure-cosmos ${{ matrix.azure-cosmos }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        azure-cosmos: [minimum, latest]
+    env:
+      COSMOS_ENDPOINT: https://localhost:8081/
+      COSMOS_EMULATOR: legacy
+      SPARK_LOCAL_IP: 127.0.0.1
+    steps: *emulator-steps
+
+  vnext:
+    name: Emulator (vnext)
+    if: ${{ always() }}
+    needs: emulator-vnext
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every azure-cosmos leg to succeed
+        env:
+          RESULT: ${{ needs.emulator-vnext.result }}
+        run: |
+          echo "vnext legs: $RESULT"
+          [ "$RESULT" = "success" ]
+
+  legacy:
+    name: Emulator (legacy)
+    if: ${{ always() }}
+    needs: emulator-legacy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every azure-cosmos leg to succeed
+        env:
+          RESULT: ${{ needs.emulator-legacy.result }}
+        run: |
+          echo "legacy legs: $RESULT"
+          [ "$RESULT" = "success" ]
 
   account:
     name: Azure Cosmos DB account

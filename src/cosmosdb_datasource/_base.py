@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -94,8 +95,23 @@ class CosmosReaderBase:
     def _driver_token(self) -> SecretToken | None:
         return mint_driver_token(self._opts.auth, self._opts.endpoint)
 
+    # Stream readers hold their client until stop(), which closes it unless another stream reader of the
+    # process still holds it.
+    _holds_client = False
+    _client_hold: tuple[Any, ...] | None = None
+    _client_hold_pid: int | None = None
+
     def _driver_backend(self, token: SecretToken | None) -> Any:
-        return client.get_backend(self._opts, token)
+        backend = client.get_backend(self._opts, token)
+        if self._holds_client and self._client_hold_pid != os.getpid():  # not a copy pickled in another process
+            self._client_hold = client.hold(self._opts)
+            self._client_hold_pid = os.getpid()
+        return backend
+
+    def _release_client(self) -> None:
+        if self._client_hold_pid == os.getpid():
+            client.release(self._client_hold)
+            self._client_hold, self._client_hold_pid = None, None
 
     def _driver_call(self, what: str, fn: Callable[[], _T]) -> _T:
         """Run a driver-side metadata request, retried on transient errors (throttling, timeouts, 5xx)."""

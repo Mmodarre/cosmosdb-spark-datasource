@@ -352,7 +352,10 @@ def test_access_tokens_of_different_principals_never_share_a_client() -> None:
     assert "token-of-principal-a" not in repr(_client_key(a))
     sp1 = opts(auth_type="service_principal", tenant_id="t", client_id="c", client_secret="s1")
     sp2 = opts(auth_type="service_principal", tenant_id="t", client_id="c", client_secret="s2")
-    assert _client_key(sp1) == _client_key(sp2)  # same principal: one client, refreshed tokens
+    assert _client_key(sp1) != _client_key(sp2)  # a rotated secret: a new client, whose fallback credential works
+    assert _client_key(sp1) == _client_key(
+        opts(auth_type="service_principal", tenant_id="t", client_id="c", client_secret="s1")
+    )
 
 
 def _sdk_policy(**extra: str):

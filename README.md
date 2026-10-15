@@ -51,7 +51,7 @@ optionally `azure-identity`), which serverless environments and pipelines can in
 |---|---|---|
 | PySpark | 4.0, 4.1, 4.2 | CI: unit tests and local Spark (JVM) tests on each version |
 | Python | 3.10 to 3.13 | CI |
-| `azure-cosmos` | `>=4.14.0,<5` | CI: unit tests with 4.14.0 and with the latest 4.x; integration tests with 4.17.1 |
+| `azure-cosmos` | `>=4.14.0,<5` | CI: unit tests with the locked version, with 4.14.0 and with the latest 4.x; integration tests against both emulators with 4.14.0 and with the latest 4.x |
 | `azure-identity` (optional) | `>=1.19,<2` | unit tests only |
 | Databricks serverless | environment version 2 or later | manually: environments 2 to 5, jobs and notebooks, with 0.2.0; environment 4 with 0.3.1 (not in CI) |
 | Databricks classic compute | DBR 15.4 LTS or later | manually with 0.2.0: DBR 15.4, 16.4, 17.3 (dedicated and standard access mode), 18.3 and 19.x (not in CI) |
@@ -221,7 +221,7 @@ does an option that the read would accept without using it:
 | `auth_type` | inferred | `key`, `service_principal`, `access_token` or `default`. Inferred when exactly one credential option is set; `default` must be explicit. `service_credential` is rejected, see [Authentication](#authentication). |
 | `account_key` | | Account key (`auth_type=key`) |
 | `tenant_id`, `client_id`, `client_secret` | | Entra ID service principal (`auth_type=service_principal`) |
-| `client_certificate`, `client_certificate_password` | | Service principal with a certificate instead of `client_secret`: the base64 of a PEM (private key and certificate) or PKCS#12 file, and its password if it has one |
+| `client_certificate`, `client_certificate_password` | | Service principal with a certificate instead of `client_secret`: the base64 of a PEM (private key and certificate) or PKCS#12 file (line breaks, as `base64` and `openssl base64` write them, are ignored), and its password if it has one |
 | `access_token`, `access_token_expires_on` | | Pre-minted bearer token. Expiry in epoch seconds or ISO-8601; read from the JWT `exp` claim if omitted (`auth_type=access_token`). |
 | `preferred_regions` | account default | Comma-separated read regions, e.g. `West Europe,North Europe` |
 | `consistency_level` | account default | `Strong`, `BoundedStaleness`, `Session`, `ConsistentPrefix` or `Eventual` (can only weaken the account level) |
@@ -245,7 +245,7 @@ does an option that the read would accept without using it:
 | `query_parameters` | | JSON list of `{"name": "@p", "value": ...}` |
 | `page_size` | `5000` | Maximum items per request (the service also caps a page at about 4 MB). Pages of 5,000 cost about 7% fewer RU per document than pages of 1,000. |
 | `prefetch_pages` | `1` | Query pages fetched ahead, on one thread per task, while the current page is converted; `0` fetches on demand |
-| `arrow_batches` | `auto` | Hand rows to Spark as Arrow record batches, built per page (`auto`: not where the Databricks engine runs the reader, on serverless compute, where the batch layout is not verified) |
+| `arrow_batches` | `auto` | Hand rows to Spark as Arrow record batches, built per page. `auto`: on PySpark 4.0 or later and on Databricks Runtime 16.4 LTS or later (classic compute), not on DBR 15.4 LTS, whose read worker takes each batch for one row (`true` is rejected there), and not on serverless compute, where the engine's batch layout is not verified |
 | `partitions_per_feed_range` | `1` | Split every physical partition into N EPK sub-ranges, for N times more tasks. Each sub-range query scans its whole physical partition, so a full read costs about N times the RU of `1` (see [Sizing and performance](#sizing-and-performance)). `auto`: one task per physical partition. |
 | `mode` | `PERMISSIVE` | Conversion errors: `PERMISSIVE` (null, plus the corrupt-record column), `DROPMALFORMED` or `FAILFAST` |
 | `raw_json_column` | `body` | Name of the column holding the whole document |

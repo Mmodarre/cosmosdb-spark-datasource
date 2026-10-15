@@ -34,6 +34,8 @@ import dataclasses
 import importlib
 import inspect
 import logging
+import os
+import re
 import sys
 from types import ModuleType
 from typing import Any
@@ -165,6 +167,41 @@ def filter_pushdown_planner() -> bool:
 def engine_loaded() -> bool:
     """Return True inside Databricks data source workers, where the engine's PySpark drives the reader."""
     return ENGINE_PACKAGE in sys.modules
+
+
+# The read worker accepts pyarrow.RecordBatch from read() from PySpark 4.0 (SPARK-48493), and on
+# Databricks Runtime 16.4 LTS, whose PySpark is 3.5.2. On DBR 15.4 LTS (PySpark 3.5.0) it takes each
+# batch for one row and fails with DATA_SOURCE_RETURN_SCHEMA_MISMATCH.
+ARROW_BATCHES_MINIMUM_DBR = (16, 4)
+_DBR_VERSION = re.compile(r"^(\d+)\.(\d+)")
+
+
+def databricks_runtime() -> tuple[int, int] | None:
+    """Return the classic Databricks Runtime version (``DATABRICKS_RUNTIME_VERSION``), or None."""
+    match = _DBR_VERSION.match(os.environ.get("DATABRICKS_RUNTIME_VERSION", ""))
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def arrow_batches_supported() -> bool | None:
+    """Return whether this runtime's read worker accepts record batches from read(); None if not known."""
+    import pyspark
+
+    major = _DBR_VERSION.match(getattr(pyspark, "__version__", ""))
+    if major and int(major.group(1)) >= 4:
+        return True
+    runtime = databricks_runtime()
+    if runtime is None:
+        return None
+    return runtime >= ARROW_BATCHES_MINIMUM_DBR
+
+
+def arrow_batches_by_default() -> bool:
+    """Return whether ``arrow_batches=auto`` hands rows to Spark as record batches here.
+
+    Not where the Databricks engine runs the reader (serverless compute): its read worker's Arrow schema
+    for the output schema has not been verified against the one built here.
+    """
+    return not engine_loaded() and arrow_batches_supported() is True
 
 
 def arrow_schema(schema: StructType) -> Any:
