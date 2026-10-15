@@ -475,8 +475,8 @@ def _infer_auth_type(opts: dict[str, str]) -> str:
 SERVICE_CREDENTIAL_UNSUPPORTED = (
     "auth_type=service_credential is not supported: Spark plans Python data source reads in worker "
     "processes that cannot use Unity Catalog service credentials. Use auth_type=service_principal with "
-    "the client secret from a secret scope, which workers can refresh. For runs shorter than the token "
-    "lifetime (about one hour), mint a token on the driver with "
+    "the client secret from a secret scope, which workers can refresh. For runs that end before the token "
+    "expires (about 24 hours for service-credential tokens), mint a token on the driver with "
     "dbutils.credentials.getServiceCredentialsProvider('<name>').get_token("
     "'https://<account>.documents.azure.com/.default') and pass auth_type=access_token, access_token and "
     "access_token_expires_on."

@@ -532,7 +532,7 @@ messages.
 |---|---|
 | `key` | development and tests; read the key from a secret scope |
 | `service_principal` | production jobs and pipelines, on Databricks with the client secret from a secret scope; the only Entra ID mode that refreshes tokens on Databricks |
-| `access_token` | tokens minted outside the data source, for example from a Unity Catalog service credential; no refresh, so a run must end within the token's lifetime (about one hour) |
+| `access_token` | tokens minted outside the data source, for example from a Unity Catalog service credential; no refresh, so a run must end before the token's `expires_on` (about 24 hours for service-credential tokens, as observed on Databricks) |
 | `default` | local development (`az login`) or compute with a managed identity (`DefaultAzureCredential`); not on Databricks, see below |
 
 Entra ID identities need a Cosmos DB **data-plane** role, such as *Cosmos DB Built-in Data Reader*
@@ -557,7 +557,7 @@ opts = {
     "client_certificate": dbutils.secrets.get("<scope>", "<certificate-base64>"),
 }
 
-# Unity Catalog service credential: mint a token on the driver (valid for about one hour)
+# Unity Catalog service credential: mint a token on the driver (valid until expires_on, about 24 hours observed)
 cred = dbutils.credentials.getServiceCredentialsProvider("<credential-name>")
 tok = cred.get_token("https://<account>.documents.azure.com/.default")
 opts = {"auth_type": "access_token", "access_token": tok.token, "access_token_expires_on": str(tok.expires_on)}
@@ -575,9 +575,11 @@ On Databricks (verified on serverless, classic dedicated and standard access mod
   `auth_type=service_credential` is rejected with this guidance. Spark plans Python data source
   reads in worker processes where none of the lookups works: `databricks.service_credentials`
   only works in UDF and task processes, and `dbutils` needs a notebook or job context. Planning
-  needs a token as well. Mint a token on the driver as shown above (verified on all three compute
-  types, with least privilege), or use a service principal for streams that run longer than an
-  hour.
+  needs a token as well. Mint a token on the driver as shown above and pass its
+  `access_token_expires_on`. Verified end to end on serverless compute: a batch read, a
+  `Trigger.AvailableNow` stream, and an SDP pipeline that mints the token in its source code; a
+  write with the same token was refused with 403 (least privilege). The tokens were valid for about
+  24 hours. Use a service principal for streams that run longer than the token is valid.
 - **`default`** finds no customer identity: IMDS is blocked on standard access mode and on
   serverless, and on dedicated mode it returns the workspace's Databricks-managed identity, shared
   by every cluster of the workspace.

@@ -19,8 +19,8 @@ data source).
 
 | Status | Rows |
 |---|---|
-| Supported | 28 |
-| Partially | 11 |
+| Supported | 29 |
+| Partially | 10 |
 | Missing | 3 |
 | N/A | 4 |
 
@@ -33,7 +33,7 @@ data source).
 | Account key | `spark.cosmos.auth.type=MasterKey`, `spark.cosmos.accountKey` | **Supported**: `auth_type=key`, `account_key` | |
 | Service principal, secret | `ServicePrincipal`, `spark.cosmos.auth.aad.clientId`, `.clientSecret`, `spark.cosmos.account.tenantId` (plus subscription and resource group) | **Supported**: `auth_type=service_principal`, `tenant_id`, `client_id`, `client_secret` | Data-plane RBAC only: no subscription or resource group. Run on Databricks (serverless, classic dedicated and standard access mode). |
 | Service principal, certificate | `spark.cosmos.auth.aad.clientCertPemBase64` | **Supported**: `client_certificate` (base64 PEM or PKCS#12), `client_certificate_password` | `CertificateCredential`; unit-tested with a real certificate, not against Entra ID. |
-| Managed identity | `ManagedIdentity`, optional `spark.cosmos.auth.aad.clientId` / `resourceId` | **Partially**: `auth_type=default` (`DefaultAzureCredential`, which includes managed identity) | Tested with the Azure CLI credential, not with a managed identity. |
+| Managed identity | `ManagedIdentity`, optional `spark.cosmos.auth.aad.clientId` / `resourceId` | **Supported** on Azure Databricks: the managed identity behind a Unity Catalog service credential, through a token minted on the driver and `auth_type=access_token` | Verified end to end on serverless compute (batch read, AvailableNow stream, SDP pipeline; a write was refused with 403). The token is not refreshed, but service-credential tokens were valid for about 24 hours. `auth_type=default` (`DefaultAzureCredential`) finds no customer identity on Databricks (IMDS is blocked or returns the workspace's managed identity); elsewhere it was tested with the Azure CLI credential, not with a managed identity. |
 | Custom token provider | `AccessToken` with `spark.cosmos.accountDataResolverServiceName` (a JVM class) | **Partially**: `auth_type=access_token` (pre-minted token, for example from a Unity Catalog service credential on the driver; not refreshed) | Unity Catalog service credentials cannot be resolved where Spark plans Python data source reads, so `auth_type=service_credential` is rejected. |
 
 ## 2. Batch reads
