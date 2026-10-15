@@ -190,6 +190,10 @@ def _path_expr(alias: str, segments: Sequence[str]) -> str:
     return alias + "".join(f"[{json.dumps(s, ensure_ascii=False)}]" for s in segments)
 
 
+def _reject_constant(name: str) -> Any:
+    raise ValueError(f"{name} is not a JSON value")
+
+
 def _ordinal_safe(text: str) -> bool:
     # Below U+D800 UTF-16 code units (one possible service order) and code points (Spark's UTF-8 binary
     # order) agree, so a range comparison against such a literal orders every string the same way.
@@ -341,7 +345,8 @@ class Translator:
 
     def _pk_equal(self, target: _Target, values: list[Any]) -> Bounds:
         # A string that is not JSON text can only be the rendering of a string key; any other string may
-        # also render a number, boolean or null key, so those candidates are added and Spark re-checks.
+        # also render a number, boolean, null or array key, so those candidates are added and Spark
+        # re-checks. Objects render as undefined (NULL), and NaN and Infinity are not JSON values.
         candidates: list[Any] = []
         exact = True
         for value in values:
@@ -349,10 +354,10 @@ class Translator:
                 return Bounds(UNKNOWN, UNKNOWN)
             candidates.append(value)
             try:
-                other = json.loads(value)
+                other = json.loads(value, parse_constant=_reject_constant)
             except ValueError:
                 continue
-            if isinstance(other, (bool, int, float)) or other is None:
+            if isinstance(other, (bool, int, float, list)) or other is None:
                 candidates.append(other)
                 exact = False
         condition = f"ARRAY_CONTAINS({self._param(candidates)}, {target.expr})"
@@ -362,8 +367,8 @@ class Translator:
     def _is_null(self, target: _Target) -> Bounds:
         if target.kind == "system":
             return Bounds(NEVER, ALWAYS)
-        if target.kind == "pk":
-            missing = f"NOT IS_DEFINED({target.expr}) OR IS_NULL({target.expr})"
+        if target.kind == "pk":  # NULL: undefined, or an object (see documents.render_partition_key)
+            missing = f"NOT IS_DEFINED({target.expr}) OR IS_OBJECT({target.expr})"
             return Bounds(Pred(missing, False), Pred(f"IS_DEFINED({target.expr})", False))
         # IS NOT NULL is not pushed for properties: it would only exclude explicit JSON nulls.
         if target.top_level and isinstance(target.dtype, StringType):
@@ -463,10 +468,10 @@ class CosmosPushdownBatchReader(CosmosBatchReader):
         keys = {json.dumps(v, ensure_ascii=False, separators=(",", ":")) for v in values}
         self._pushed_keys = tuple(sorted(keys if self._pushed_keys is None else keys & set(self._pushed_keys)))
 
-    def _partition_keys(self) -> list[str]:
+    def _partition_keys(self) -> list[str] | None:
         if self._opts.partition_key is not None or self._pushed_keys is None:
             return super()._partition_keys()
-        return list(self._pushed_keys)
+        return list(self._pushed_keys)  # empty if the pushed key filters exclude each other
 
     def _partition_key_info(self) -> PartitionKeyInfo:
         backend = self._driver_backend(self._driver_token())

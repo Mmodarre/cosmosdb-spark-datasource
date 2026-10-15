@@ -6,6 +6,8 @@ import collections
 import json
 import logging
 import random
+import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -771,3 +773,13 @@ def test_driver_retries_are_bounded_and_transient_only(make_store, no_sleep, mon
     with pytest.raises(FakeHttpError, match="403"):
         other.latest()
     assert no_sleep == []
+
+
+def test_a_future_start_from_is_rejected_with_an_initial_snapshot(make_store) -> None:
+    store = make_store()
+    future = datetime.fromtimestamp(time.time() + 3600, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    past = datetime.fromtimestamp(time.time() - 3600, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with pytest.raises(CosmosConfigError, match="cannot be in the future with initial_snapshot"):
+        make_source(fake_options(store, change_feed_mode="LatestVersion", start_from=future, initial_snapshot="true"))
+    make_source(fake_options(store, change_feed_mode="LatestVersion", start_from=past, initial_snapshot="true"))
+    make_source(fake_options(store, change_feed_mode="LatestVersion", start_from=future))

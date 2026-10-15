@@ -67,6 +67,10 @@ def conv(dt, value, nullable=True):
         (LongType(), "42", 42),
         (LongType(), 42.0, 42),
         (LongType(), "1e3", 1000),
+        (LongType(), " +7\t", 7),
+        (LongType(), "12.0", 12),
+        (DoubleType(), "-Infinity", float("-inf")),
+        (DoubleType(), "1E3", 1000.0),
         (IntegerType(), -(2**31), -(2**31)),
         (DoubleType(), "2.5", 2.5),
         (DoubleType(), 3, 3.0),
@@ -90,7 +94,17 @@ def test_scalar_conversions(dt, value, expected) -> None:
         (ByteType(), 300),
         (IntegerType(), 2**31),
         (BooleanType(), "yes"),
+        (LongType(), "1_000"),
+        (LongType(), "\u0661\u0662"),  # Arabic-Indic digits
+        (LongType(), "0x10"),
+        (LongType(), "1e999999999"),
+        (LongType(), "1.5e0"),
+        (DoubleType(), "1_000"),
+        (DoubleType(), "\u0661\u0662"),
         (DoubleType(), "nan-ish"),
+        (DecimalType(10, 2), "1_000"),
+        (DecimalType(10, 2), "\u0661\u0662"),
+        (TimestampType(), "\u0662\u0660\u0662\u0666-01-31"),
         (DoubleType(), [1]),
         (DecimalType(4, 2), 123.45),
         (DecimalType(10, 2), "1,5"),
@@ -180,6 +194,26 @@ def test_permissive_keeps_row_with_nulls_and_corrupt_json() -> None:
     assert bad[2] is None and bad[3] is None and bad[4] == ("Mel", None)
     assert json.loads(bad[7]) == BAD
     assert len(arrow_ok([good, bad], USER_SCHEMA)) == 2
+
+
+def test_columns_that_differ_only_in_case_never_share_a_value() -> None:
+    schema = StructType(
+        [
+            StructField("name", StringType()),
+            StructField("Name", StringType()),
+            StructField("other", StringType()),
+            StructField("s", StructType([StructField("k", StringType()), StructField("K", StringType())])),
+        ]
+    )
+    b = builder(schema)
+    assert b.build(RecordView({"name": "x", "OTHER": "o", "s": {"k": 1}})) == ("x", None, "o", ("1", None))
+    assert b.build(RecordView({"Name": "y", "s": {"K": 2}})) == (None, "y", None, (None, "2"))
+    assert b.build(RecordView({"NAME": "z"})) == (None, None, None, None)
+
+
+def test_a_document_with_several_spellings_resolves_exact_name_first() -> None:
+    b = builder(StructType([StructField("name", StringType()), StructField("NICK", StringType())]))
+    assert b.build(RecordView({"Name": "first", "name": "exact", "nick": "a", "Nick": "b"})) == ("exact", "a")
 
 
 def test_dropmalformed_and_failfast() -> None:

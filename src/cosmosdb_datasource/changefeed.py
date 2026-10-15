@@ -186,6 +186,21 @@ class ReadStats:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+_SDK_CHANGE_FEED_PACKAGE = "azure.cosmos._change_feed"
+
+
+def sdk_recursion_error(exc: BaseException) -> bool:
+    """Return True for a ``RecursionError`` raised inside the SDK's change-feed code (its 410 handling)."""
+    if not isinstance(exc, RecursionError):
+        return False
+    tb = exc.__traceback__
+    while tb is not None:
+        if str(tb.tb_frame.f_globals.get("__name__", "")).startswith(_SDK_CHANGE_FEED_PACKAGE):
+            return True
+        tb = tb.tb_next
+    return False
+
+
 def all_reached(positions: list[Position], end_lsn: int) -> bool:
     return bool(positions) and all(p.lsn is not None and p.lsn >= end_lsn for p in positions)
 
@@ -221,12 +236,12 @@ def read_bounded(
     * Transient errors resume from the last fully consumed page (no duplicates, no gaps).
     * If the SDK widens the scope after a split (children outside ``[lo, hi)``), the page is
       discarded and the read resumes from a token clipped to ``[lo, hi)`` (``clip_positions``).
-    * A partition that is gone (410) after the SDK's own handling, or a ``RecursionError`` from it,
-      is retried like a transient error; ``replan(positions)`` then rebuilds the continuation from
-      the current topology. azure-cosmos 4.17.1 handles a 410 by calling ``fetch_next_block``
-      again without a bound (``ChangeFeedFetcherV2``), so while it keeps getting 410 for a range it
-      fails with ``RecursionError``; a continuation built from freshly read partitions holds no gone
-      range.
+    * A partition that is gone (410) after the SDK's own handling, or a ``RecursionError`` from the
+      SDK's change-feed code, is retried like a transient error; ``replan(positions)`` then rebuilds
+      the continuation from the current topology. azure-cosmos 4.17.1 handles a 410 by calling
+      ``fetch_next_block`` again without a bound (``ChangeFeedFetcherV2``), so while it keeps getting
+      410 for a range it fails with ``RecursionError``; a continuation built from freshly read
+      partitions holds no gone range. Any other ``RecursionError`` is not retried.
     """
     resume: str | None = None
     attempt = 0
@@ -277,12 +292,18 @@ def read_bounded(
                 if page.drained:
                     break
         except Exception as exc:
-            gone = isinstance(exc, RecursionError) or retry.status_code(exc) == 410
+            recursion = sdk_recursion_error(exc)
+            gone = recursion or retry.status_code(exc) == 410
             if isinstance(exc, CosmosChangeFeedError) or not (gone or retry.is_transient(exc)):
                 raise
             attempt += 1
             stats.retries += 1
             if attempt > policy.max_retries:
+                if recursion:
+                    raise CosmosChangeFeedError(
+                        f"azure-cosmos kept failing with RecursionError while reading the change feed of {describe} "
+                        f"after a partition split ({policy.max_retries} retries); the task will be retried by Spark."
+                    ) from exc
                 raise
             if gone and replan is not None:
                 resume = replan(accepted)

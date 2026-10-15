@@ -51,6 +51,9 @@ class QueryPage:
     request_charge: float = 0.0
     partitions: tuple[str, ...] = ()  # partition key range ids of the responses that make up the page
     server_time: float | None = None  # epoch seconds, from the first response's Date header
+    # The physical partitions the client's routing map held right after the page was fetched (EPK-range
+    # queries only), read under the same lock as the page.
+    feed_ranges: list[tuple[str, str]] | None = None
 
 
 def _server_time(headers: Any) -> float | None:
@@ -114,8 +117,8 @@ class SdkBackend:
         # and 4.17.1 writes throttle counters into that object after each request while the query path
         # copies it, which fails with "OrderedDict mutated during iteration". Requests on one client are
         # therefore serialized, also across backends of different containers, which share the client's
-        # lock. The read-ahead thread holds it only while it fetches a page. Change-feed position probes
-        # are the exception (see ``_probe``).
+        # lock. The read-ahead thread holds it only while it fetches a page and reads the routing map after
+        # it. Change-feed position probes are the exception (see ``_probe``).
         self._sdk_lock = sdk_lock if sdk_lock is not None else threading.RLock()
         self._priority = priority
         self._prefetch_pages = prefetch_pages
@@ -137,14 +140,14 @@ class SdkBackend:
         return str(self.properties()["_rid"])
 
     def feed_ranges(self, force_refresh: bool = False) -> list[tuple[str, str]]:
+        # Even without force_refresh this can send a request: the SDK reads the partition key ranges when its
+        # routing-map cache is empty, as after its handling of a split.
+        with self._sdk_lock:
+            return self._feed_ranges(force_refresh)
+
+    def _feed_ranges(self, force_refresh: bool) -> list[tuple[str, str]]:
         ranges = []
-        if force_refresh:
-            with self._sdk_lock:
-                feed_ranges = list(self._container.read_feed_ranges(force_refresh=True))
-        else:
-            # Answered from the client's routing-map cache, so the per-page topology check of a query read
-            # does not wait for the read-ahead thread's fetch.
-            feed_ranges = list(self._container.read_feed_ranges(force_refresh=False))
+        feed_ranges = list(self._container.read_feed_ranges(force_refresh=force_refresh))
         for fr in feed_ranges:
             rng = fr["Range"]
             ranges.append((str(rng["min"]).upper(), str(rng["max"]).upper()))
@@ -252,6 +255,7 @@ class SdkBackend:
         while True:
             with self._sdk_lock:
                 page = next(pages, None)
+                topology = self._feed_ranges(False) if page is not None and "feed_range" in scope else None
             if page is None:
                 return
             items = list(page)
@@ -267,6 +271,7 @@ class SdkBackend:
                 request_charge=sum(charges),
                 partitions=tuple(served),
                 server_time=next((t for t in times if t is not None), None),
+                feed_ranges=topology,
             )
             charges.clear()
             served.clear()

@@ -269,6 +269,37 @@ def test_split_during_a_snapshot_stream_scan(make_store, no_sleep, mode) -> None
     assert len(ids) == len(set(ids)) == 120
 
 
+def test_header_mutations_on_different_pages_are_each_repeated(make_store, no_sleep) -> None:
+    """The limit applies to one page: a long scan may meet the race on many pages."""
+    store = make_store(partitions=1)
+    load(store, 100)
+    attempts = [0]
+
+    def race() -> None:
+        attempts[0] += 1
+        if attempts[0] % 3 == 0:  # every third request: once on most pages
+            raise RuntimeError(retry.CONCURRENT_HEADER_MUTATION)
+
+    store._before_query_page = race
+    stats = QueryStats()
+    try:
+        docs = query_documents(
+            FakeBackend(store),
+            "SELECT * FROM c",
+            None,
+            ("", "FF"),
+            10,
+            policy=retry.RetryPolicy(max_retries=8),
+            stats=stats,
+            describe="test",
+            pk=PartitionKeyInfo(paths=("/pk",)),
+        )
+        assert sorted(d["id"] for d in docs) == sorted(f"d{i}" for i in range(100))
+        assert stats.retries > retry.MAX_CONCURRENT_MUTATION_RETRIES
+    finally:
+        store._before_query_page = None
+
+
 @pytest.mark.parametrize(("races", "retried"), [(2, True), (3, False)])
 def test_a_concurrent_header_mutation_is_repeated_at_most_twice(make_store, no_sleep, races, retried) -> None:
     """azure-cosmos 4.17.1 raises this when another request on the client mutates the headers a query copies."""
@@ -358,6 +389,9 @@ class _StubContainer:
         self.pages = pages
         self.calls: list[dict] = []
 
+    def read_feed_ranges(self, force_refresh=False):
+        return [{"Range": {"min": "", "max": "80"}}, {"Range": {"min": "80", "max": "FF"}}]
+
     def query_items(self, **kwargs):
         self.calls.append(kwargs)
         stub = self
@@ -387,3 +421,4 @@ def test_sdk_backend_reports_the_serving_partitions_and_the_server_time() -> Non
     assert pages[0].server_time == 1792000495.0 and pages[1].server_time is None and pages[2].server_time is None
     assert pages[0].request_charge == 2.5 and [p.continuation for p in pages] == ["c1", None, None]
     assert container.calls[0]["continuation"] == "c0" and container.calls[0]["feed_range"]["Range"]["max"] == "FF"
+    assert all(p.feed_ranges == [("", "80"), ("80", "FF")] for p in pages)  # read with each page

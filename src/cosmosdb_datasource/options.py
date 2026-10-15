@@ -688,6 +688,15 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
             start_from = "Now"
     else:
         start_from = _parse_start_from(start_from_raw)
+    future_start = start_from not in ("Beginning", "Now") and parse_timestamp_option(
+        "start_from", start_from
+    ) > datetime.now(timezone.utc)
+    if future_start and _bool(opts, "initial_snapshot", False):
+        raise CosmosConfigError(
+            "Option 'start_from' cannot be in the future with initial_snapshot=true: the snapshot reads the "
+            "container when the stream starts, so the changes made before start_from would be missing from "
+            "the result. Use start_from=Now, or a time that has passed."
+        )
 
     snapshot_stream = _bool(opts, "snapshot_stream", False)
     if snapshot_stream:

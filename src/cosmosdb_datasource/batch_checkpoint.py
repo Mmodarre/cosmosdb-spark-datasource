@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from typing import Any
 
@@ -68,14 +70,31 @@ class BatchCheckpoint:
         return os.path.exists(os.path.join(self._commits, str(index)))
 
     def plan(self, planned: PlannedRange) -> None:
+        """Create ``offsets/<n>``; fail if it exists, so two jobs cannot both plan read n."""
         os.makedirs(self._offsets, exist_ok=True)
         path = os.path.join(self._offsets, str(planned.index))
-        if os.path.exists(path):
-            raise CosmosOffsetError(f"Batch checkpoint offsets/{planned.index} exists already: another job writes it.")
-        tmp = f"{path}.tmp"
-        with open(tmp, "w") as fh:
-            json.dump(planned.to_dict(), fh)
-        os.replace(tmp, path)
+        text = json.dumps(planned.to_dict())
+        fd, tmp = tempfile.mkstemp(dir=self._offsets, prefix=f".{planned.index}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(text)
+            try:
+                os.link(tmp, path)  # atomic, and never replaces an existing file
+            except FileExistsError:
+                raise self._taken(planned.index) from None
+            except OSError:  # a file system without hard links, such as some FUSE mounts
+                try:
+                    with open(path, "x") as fh:
+                        fh.write(text)
+                except FileExistsError:
+                    raise self._taken(planned.index) from None
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+
+    @staticmethod
+    def _taken(index: int) -> CosmosOffsetError:
+        return CosmosOffsetError(f"Batch checkpoint offsets/{index} exists already: another job writes it.")
 
     def commit(self) -> bool:
         latest = self.latest()

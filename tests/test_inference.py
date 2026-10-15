@@ -97,6 +97,52 @@ def test_inferred_schema_layout(caplog: pytest.LogCaptureFixture) -> None:
         schema_of([1, 2])
 
 
+def test_names_that_differ_only_in_case_are_one_column(caplog: pytest.LogCaptureFixture) -> None:
+    docs = [
+        {"id": "1", "pk": "p", "name": "x", "s": {"a": 1}},
+        {"id": "2", "pk": "p", "Name": "y", "s": {"A": "q"}, "ID": "other", "Body": 1},
+        {"id": "3", "pk": "p", "NAME": 5, "name": "both"},
+    ]
+    with caplog.at_level(logging.WARNING, logger="cosmosdb_datasource"):
+        schema = schema_of(docs)
+    assert schema == struct(
+        ("id", StringType()),
+        ("pk", StringType()),
+        ("name", StringType()),  # the first spelling; STRING and BIGINT merge to STRING
+        ("s", struct(("a", StringType()))),
+    )
+    assert "'Body' is not inferred" in caplog.text
+
+
+def test_a_property_shadowed_by_the_pk_column_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    tenant = PartitionKeyInfo(paths=("/tenantId",), kind="Hash", version=2)
+    with caplog.at_level(logging.WARNING, logger="cosmosdb_datasource"):
+        schema = infer_schema(
+            [{"id": "1", "tenantId": "t", "pk": "mine", "PK": 1}],
+            tenant,
+            raw_column="body",
+            corrupt_column="_corrupt_record",
+        )
+    assert schema.fieldNames() == ["id", "pk", "tenantId"]
+    assert "'pk' is not inferred" in caplog.text  # with PK: one property, named as first seen
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="cosmosdb_datasource"):
+        assert schema_of([{"id": "1", "pk": "p"}]).fieldNames() == ["id", "pk"]  # the key property itself
+    assert caplog.text == ""
+
+
+def test_case_variants_read_into_one_column(make_store) -> None:
+    store = make_store()
+    store.upsert({"id": "1", "pk": "a", "name": "x"})
+    store.upsert({"id": "2", "pk": "b", "Name": "y"})
+    store.upsert({"id": "3", "pk": "c", "Name": "late", "name": "exact"})
+    options = fake_options(store, infer_schema="true")
+    schema = make_source(options).schema()
+    assert schema.fieldNames() == ["id", "pk", "name"]
+    rows, _ = run_batch(options)
+    assert sorted((r[0], r[2]) for r in rows) == [("1", "x"), ("2", "y"), ("3", "exact")]
+
+
 def load(store, n: int = 90) -> None:
     for i in range(n):
         doc = {"id": f"d{i}", "pk": f"p{i % 7}", "n": i, "kind": ["a", "b"][i % 2], "nested": {"v": i * 1.5}}

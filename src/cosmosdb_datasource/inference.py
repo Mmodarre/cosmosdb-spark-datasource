@@ -9,8 +9,13 @@ documents of every partition.
 Types merge like the connector's ``CosmosTableSchemaInferrer`` (``TypeCoercion.findTightestCommonType``,
 then struct and array merging, else STRING), with three differences: every integer is BIGINT (JSON as
 parsed by Python does not tell 32 from 64 bits, and a later document may not fit an INT), integers beyond
-the BIGINT range are DOUBLE, and a property that is null or an empty array in every sampled document is
-STRING rather than NULL. Fields keep the order in which they first appear in the sample.
+the BIGINT range are DOUBLE, and a property that is null in every sampled document is STRING rather than
+NULL (an array that is empty in every sample is ARRAY<STRING>). Fields keep the order in which they first
+appear in the sample.
+
+Spark resolves column names case-insensitively by default, so property names that differ only in case
+(``name`` and ``Name``) are one field, named as first seen, with the types of both merged. The row builder
+reads such a column by exact name first, then case-insensitively (:mod:`cosmosdb_datasource.schema`).
 """
 
 from __future__ import annotations
@@ -36,7 +41,7 @@ from pyspark.sql.types import (
 from cosmosdb_datasource import client, retry
 from cosmosdb_datasource.auth import mint_driver_token
 from cosmosdb_datasource.batch import QueryStats, query_documents
-from cosmosdb_datasource.documents import PartitionKeyInfo
+from cosmosdb_datasource.documents import PartitionKeyInfo, parse_path
 from cosmosdb_datasource.errors import CosmosConfigError
 from cosmosdb_datasource.options import CosmosOptions
 from cosmosdb_datasource.schema import FEED_RANGE_COLUMN, PK_COLUMN
@@ -70,10 +75,26 @@ def value_type(value: Any) -> DataType:
     return StringType()
 
 
+def _add_field(fields: dict[str, tuple[str, DataType]], name: str, dtype: DataType) -> None:
+    """Add a field to ``fields`` (lower-case name -> (name, type)): one field per name in any case."""
+    key = name.lower()
+    if key in fields:
+        first, current = fields[key]
+        fields[key] = (first, merge_types(current, dtype))
+    else:
+        fields[key] = (name, dtype)
+
+
+def _struct(fields: dict[str, tuple[str, DataType]]) -> StructType:
+    return StructType([StructField(name, dtype, True) for name, dtype in fields.values()])
+
+
 def object_type(doc: Mapping[str, Any], *, skip: Sequence[str] = ()) -> StructType:
-    return StructType(
-        [StructField(str(k), value_type(v), True) for k, v in doc.items() if isinstance(k, str) and k not in skip]
-    )
+    fields: dict[str, tuple[str, DataType]] = {}
+    for key, value in doc.items():
+        if isinstance(key, str) and key not in skip:
+            _add_field(fields, key, value_type(value))
+    return _struct(fields)
 
 
 def merge_types(a: DataType, b: DataType) -> DataType:
@@ -93,10 +114,10 @@ def merge_types(a: DataType, b: DataType) -> DataType:
 
 
 def merge_structs(a: StructType, b: StructType) -> StructType:
-    fields = {f.name: f.dataType for f in a.fields}
-    for f in b.fields:
-        fields[f.name] = merge_types(fields[f.name], f.dataType) if f.name in fields else f.dataType
-    return StructType([StructField(name, dtype, True) for name, dtype in fields.items()])
+    fields: dict[str, tuple[str, DataType]] = {}
+    for f in (*a.fields, *b.fields):
+        _add_field(fields, f.name, f.dataType)
+    return _struct(fields)
 
 
 def _resolve_nulls(dtype: DataType) -> DataType:
@@ -122,8 +143,9 @@ def infer_schema(
     skip = [] if system_properties else list(SYSTEM_PROPERTIES)
     if not timestamp and not system_properties:
         skip.append(TIMESTAMP_PROPERTY)
-    # Names the row builder fills from somewhere else than the property of the same name.
-    shadowed = {PK_COLUMN, raw_column, corrupt_column, FEED_RANGE_COLUMN}
+    # Names the row builder fills from somewhere else than the property of the same name, in any case.
+    shadowed = {n.lower() for n in (PK_COLUMN, raw_column, corrupt_column, FEED_RANGE_COLUMN)}
+    key_path = parse_path(pk.paths[0]) if len(pk.paths) == 1 else ()
     merged = StructType([])
     has_pk = False
     for doc in documents:
@@ -134,18 +156,24 @@ def infer_schema(
             )
         merged = merge_structs(merged, object_type(doc, skip=skip))
         has_pk = has_pk or pk.render(doc) is not None
-    fields = {f.name: _resolve_nulls(f.dataType) for f in merged.fields}
-    for name in sorted(shadowed & fields.keys() - {PK_COLUMN}):
-        logger.warning(
-            "cosmosdb infer_schema: property %r is not inferred; the column of that name has another use.", name
-        )
     out = []
-    if "id" in fields:
-        out.append(StructField("id", fields["id"], True))
+    properties = []
+    for f in merged.fields:
+        dtype = _resolve_nulls(f.dataType)
+        if f.name.lower() == "id":
+            out.append(StructField("id", dtype, True))
+        elif f.name.lower() in shadowed:
+            if key_path != (f.name,):  # the partition key property itself is the pk column
+                logger.warning(
+                    "cosmosdb infer_schema: property %r is not inferred; the column %r has another use.",
+                    f.name,
+                    f.name.lower(),
+                )
+        else:
+            properties.append(StructField(f.name, dtype, True))
     if has_pk:
         out.append(StructField(PK_COLUMN, StringType(), True))
-    out.extend(StructField(n, t, True) for n, t in fields.items() if n != "id" and n not in shadowed)
-    return StructType(out)
+    return StructType(out + properties)
 
 
 def sample_documents(opts: CosmosOptions) -> tuple[list[Any], PartitionKeyInfo]:

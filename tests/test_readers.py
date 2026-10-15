@@ -20,7 +20,7 @@ from cosmosdb_datasource import _base
 from cosmosdb_datasource.errors import CosmosChangeFeedError, CosmosConfigError, CosmosOffsetError
 from cosmosdb_datasource.offsets import Offset, RangeState
 from tests.conftest import fake_options
-from tests.harness import StreamHarness, make_source, run_batch
+from tests.harness import StreamHarness, _ship, make_source, run_batch
 
 
 def load(store, n: int, start: int = 0, keys: int = 41, **fields) -> None:
@@ -283,7 +283,7 @@ def test_recursion_errors_without_a_replan_exhaust_the_retries(make_store, no_sl
     store.split(store.partitions[0].id)
     store.gone_recursion_errors = 10
     backend = FakeBackend(store)
-    with pytest.raises(RecursionError):
+    with pytest.raises(CosmosChangeFeedError, match="RecursionError") as raised:
         list(
             changefeed.read_bounded(
                 lambda resume: backend.change_feed_pages(("", "FF"), "LatestVersion", 0, 5, resume),
@@ -296,6 +296,33 @@ def test_recursion_errors_without_a_replan_exhaust_the_retries(make_store, no_sl
                 describe="test",
             )
         )
+    assert isinstance(raised.value.__cause__, RecursionError)
+    assert store.gone_recursion_errors == 6  # the first attempt and 3 retries
+
+
+def test_a_recursion_error_outside_the_sdk_is_not_retried(no_sleep) -> None:
+    from cosmosdb_datasource import changefeed, retry
+
+    calls = []
+
+    def open_pages(resume):
+        calls.append(resume)
+        raise RecursionError("maximum recursion depth exceeded")
+
+    with pytest.raises(RecursionError):
+        list(
+            changefeed.read_bounded(
+                open_pages,
+                start_lsn=0,
+                end_lsn=10,
+                mode="LatestVersion",
+                policy=retry.RetryPolicy(max_retries=3),
+                end_wait_seconds=1,
+                stats=changefeed.ReadStats(),
+                describe="test",
+            )
+        )
+    assert len(calls) == 1 and no_sleep == []
 
 
 def test_split_positions_follows_the_current_partitions() -> None:
@@ -516,6 +543,62 @@ def test_fresh_query_call_order_of_pyspark_40(make_store) -> None:
     first_end = json.dumps(beginning.planner.latestOffset())
     first_start = json.dumps(beginning.planner.initialOffset())
     assert len(beginning.read_range(first_start, first_end)) == 34
+
+
+def _available_now_wrapper_run(h: StreamHarness, *, restart: bool) -> list[tuple]:
+    """One Trigger.AvailableNow run under spark.sql.streaming.triggerAvailableNowWrapper.enabled (PySpark 4.0.1).
+
+    The wrapper's prepareForTriggerAvailableNow calls latestOffset() while the logical plan is built, then
+    initializeExecution calls setLatestSeenOffset (partitions(offset, offset)) on a restart, and every
+    batch of the run ends at the offset fetched first.
+    """
+    if restart:
+        h.planner.stop()
+        h.planner = _ship(h.ds).streamReader(h.schema)
+    fetched = json.dumps(h.planner.latestOffset())
+    if restart:
+        assert h.committed is not None
+        h.planner.partitions(json.loads(h.committed), json.loads(h.committed))
+    else:
+        h.committed = json.dumps(h.planner.initialOffset())
+    rows = []
+    while fetched != h.committed:
+        rows.extend(h.read_range(h.committed, fetched))
+        h.planner.commit(json.loads(fetched))
+        h.committed = fetched
+    return rows
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"change_feed_mode": "LatestVersion"},
+        {"change_feed_mode": "LatestVersion", "initial_snapshot": "true", "initial_snapshot_delay_seconds": "0"},
+        {"change_feed_mode": "LatestVersion", "max_items_per_trigger": "3"},
+        {"snapshot_stream": "true"},
+    ],
+    ids=["latest-version", "initial-snapshot", "capped", "snapshot-stream"],
+)
+def test_the_available_now_wrapper_is_rejected_on_a_restart(make_store, extra) -> None:
+    store = make_store(partitions=2)
+    load(store, 10)
+    h = StreamHarness(fake_options(store, **extra))
+    assert _available_now_wrapper_run(h, restart=False)  # a new query reads from its own start
+    load(store, 5, start=10)
+    with pytest.raises(CosmosConfigError, match=r"triggerAvailableNowWrapper\.enabled"):
+        _available_now_wrapper_run(h, restart=True)
+
+
+@pytest.mark.parametrize("extra", [{"change_feed_mode": "LatestVersion"}, {"snapshot_stream": "true"}])
+def test_restarts_without_the_wrapper_are_not_rejected(make_store, extra) -> None:
+    store = make_store(partitions=2)
+    load(store, 10)
+    h = StreamHarness(fake_options(store, **extra))
+    h.start()
+    assert len(h.run_batch() or []) == 10
+    h.restart()  # setLatestSeenOffset is the first call
+    load(store, 5, start=10)
+    assert len(h.run_batch() or []) == (15 if extra.get("snapshot_stream") else 5)
 
 
 def test_stream_schema_is_validated_through_arrow(make_store) -> None:

@@ -29,7 +29,7 @@ SESSION_NOT_AVAILABLE = (404, 1002)
 # throttle counters into that object after every request (``_retry_utility.Execute``), while a query
 # copies its own response's headers (``__QueryFeed``). The package serializes its requests per client
 # (``SdkBackend``), but the SDK's background endpoint refresh can still overlap a query, and the copy then
-# fails with this message. The request is repeated without delay, at most twice per read.
+# fails with this message. The request is repeated without delay, at most twice in a row.
 CONCURRENT_HEADER_MUTATION = "OrderedDict mutated during iteration"
 MAX_CONCURRENT_MUTATION_RETRIES = 2
 

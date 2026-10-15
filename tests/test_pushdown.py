@@ -247,6 +247,18 @@ def test_pk_candidates_and_hierarchical_keys() -> None:
     t = translator()
     t.bounds(In(("pk",), ("a", "5", "true", "null")))
     assert t.parameters[0]["value"] == ["a", "5", 5, "true", True, "null", None]
+    for text in ("NaN", "Infinity", "-Infinity"):  # not JSON values: only a string key renders like that
+        t = translator()
+        pred = t.bounds(EqualTo(("pk",), text)).true
+        assert pred.exact and t.parameters[0]["value"] == [text]
+        json.dumps(t.parameters, allow_nan=False)
+    t = translator()
+    pred = t.bounds(EqualTo(("pk",), '{"o":1}')).true  # an object key renders as NULL, not as its JSON
+    assert pred.exact and t.parameters[0]["value"] == ['{"o":1}']
+    t = translator()
+    pred = t.bounds(EqualTo(("pk",), "[1,2]")).true  # an array key renders as its JSON: Spark re-checks
+    assert not pred.exact and t.parameters[0]["value"] == ["[1,2]", [1, 2]]
+    assert translator().bounds(IsNull(("pk",))).true.sql == 'NOT IS_DEFINED(c["pk"]) OR IS_OBJECT(c["pk"])'
     hierarchical = translator(PartitionKeyInfo(paths=("/t", "/u"), kind="MultiHash", version=2))
     assert hierarchical.bounds(EqualTo(("pk",), '["a","b"]')).true.sql is None
 
@@ -509,6 +521,27 @@ def spark_eval(flt: Any, row: tuple) -> bool | None:
         "StringContains": lambda a, b: b in a,
     }
     return ops[kind](value, flt.value)
+
+
+def test_pk_filters_on_keys_that_are_not_strings(make_store) -> None:
+    store = make_store(partitions=2)
+    keys = [{"o": 1}, [1, 2], "[1,2]", '{"o":1}', "NaN", 5, "5", None, ...]
+    for i, key in enumerate(keys):
+        store.upsert({"id": f"d{i}"} if key is ... else {"id": f"d{i}", "pk": key})
+    all_rows, _ = run_batch(fake_options(store), SCHEMA)
+    assert {r[0]: r[1] for r in all_rows}["d0"] is None  # an object key is the undefined key
+    for flt in (
+        EqualTo(("pk",), '{"o":1}'),
+        EqualTo(("pk",), "[1,2]"),
+        EqualTo(("pk",), "NaN"),
+        In(("pk",), ("5", "[1,2]")),
+        IsNull(("pk",)),
+        IsNotNull(("pk",)),
+        Not(EqualTo(("pk",), '{"o":1}')),
+    ):
+        expected = sorted(r[0] for r in all_rows if spark_eval(flt, r) is True)
+        rows, _parts, remaining = run_batch_with_filters(pushdown_options(store), SCHEMA, [flt])
+        assert sorted(r[0] for r in rows if all(spark_eval(f, r) is True for f in remaining)) == expected, flt
 
 
 @pytest.mark.parametrize("seed", range(6))

@@ -5,7 +5,8 @@ Mirrors (PySpark 4.0-4.2):
   user schema is given, then the instance is pickled and shipped to other workers.
 * ``worker/plan_data_source_read.py``: reader = ds.reader(schema) / streamReader(schema); the read
   function capturing the reader is pickled *before* ``partitions()``; every partition is pickled
-  separately; rows go through ``records_to_arrow_batches`` (type validation).
+  separately; an empty plan becomes ``[None]`` (4.0, 4.1) or ``[InputPartition(None)]`` (4.2); rows
+  go through ``records_to_arrow_batches`` (type validation).
 * ``streaming/python_streaming_source_runner.py``: a long-lived reader receives
   initialOffset / latestOffset / partitions / commit with offsets serialized as JSON.
 * ``PythonMicroBatchStream.setLatestSeenOffset``: on restart ``partitions(offset, offset)``.
@@ -18,8 +19,9 @@ import pickle
 from typing import Any
 
 import pyarrow as pa
+import pyspark
 from pyspark import cloudpickle
-from pyspark.sql.datasource import CaseInsensitiveDict
+from pyspark.sql.datasource import CaseInsensitiveDict, InputPartition
 from pyspark.sql.types import ArrayType, MapType, StructType
 from pyspark.sql.worker.plan_data_source_read import records_to_arrow_batches
 
@@ -65,6 +67,12 @@ def as_rows(output: list[Any], schema: StructType) -> list[tuple]:
     return rows
 
 
+def spark_substitute_for_no_partitions() -> list[Any]:
+    """What ``plan_data_source_read`` plans for a batch reader whose ``partitions()`` is empty."""
+    major, minor = (int(p) for p in pyspark.__version__.split(".")[:2])
+    return [InputPartition(None)] if (major, minor) >= (4, 2) else [None]
+
+
 def run_batch(options: dict[str, str], schema: StructType | None = None) -> tuple[list[tuple], list[Any]]:
     rows, parts, _remaining = run_batch_with_filters(options, schema, None)
     return rows, parts
@@ -89,7 +97,7 @@ def run_batch_with_filters(
     parts = reader.partitions()
     assert isinstance(parts, list)
     rows: list[tuple] = []
-    for part in parts or [None]:
+    for part in parts or spark_substitute_for_no_partitions():
         executor_reader = cloudpickle.loads(shipped)
         out = list(executor_reader.read(pickle.loads(pickle.dumps(part))))
         validate_rows(out, schema, ds)

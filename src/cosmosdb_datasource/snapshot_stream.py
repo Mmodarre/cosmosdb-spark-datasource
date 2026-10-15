@@ -29,13 +29,18 @@ import logging
 import time
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta, timezone
-from typing import Any, cast
+from typing import Any
 
 from pyspark.sql.datasource import DataSourceStreamReader, InputPartition
 from pyspark.sql.types import StructType
 
 from cosmosdb_datasource import _compat, client, epk
-from cosmosdb_datasource._base import CosmosReaderBase
+from cosmosdb_datasource._base import (
+    AVAILABLE_NOW_WRAPPER_UNSUPPORTED,
+    CosmosReaderBase,
+    is_empty_partition,
+    unexpected_partition,
+)
 from cosmosdb_datasource.auth import SecretToken
 from cosmosdb_datasource.batch import (
     _CROSS_PARTITION_CLAUSES,
@@ -45,7 +50,7 @@ from cosmosdb_datasource.batch import (
     split_feed_ranges,
 )
 from cosmosdb_datasource.documents import PartitionKeyInfo
-from cosmosdb_datasource.errors import CosmosOffsetError
+from cosmosdb_datasource.errors import CosmosConfigError, CosmosOffsetError
 from cosmosdb_datasource.offsets import SnapshotStreamOffset, format_snapshot_ts
 from cosmosdb_datasource.options import MODE_LATEST_VERSION, CosmosOptions
 from cosmosdb_datasource.schema import SNAPSHOT_TS_COLUMN, RecordView
@@ -105,8 +110,14 @@ class CosmosSnapshotStreamReader(CosmosReaderBase, DataSourceStreamReader, _Avai
         self._target_seq: int | None = None  # AvailableNow: the one snapshot this run may plan
         self._last_planned_at: float | None = None  # monotonic time of the last new snapshot (warning only)
         self._warned_back_to_back = False
+        self._initial_requested = False  # Spark called initialOffset()
+        self._latest_from_initial = False  # latestOffset() without arguments started from the initial offset
 
     def initialOffset(self) -> dict:
+        self._initial_requested = True
+        return self._initial_offset()
+
+    def _initial_offset(self) -> dict:
         initial = SnapshotStreamOffset(0)
         if self._known is None:
             self._known = initial
@@ -120,7 +131,8 @@ class CosmosSnapshotStreamReader(CosmosReaderBase, DataSourceStreamReader, _Avai
             base = SnapshotStreamOffset.from_dict(start)
         else:  # PySpark 4.0/4.1: no arguments; a new query calls this before initialOffset()
             if self._known is None:
-                self.initialOffset()
+                self._initial_offset()
+                self._latest_from_initial = True
             base = self._known
         assert base is not None
         if self._planned is not None and self._planned[0] == base:
@@ -162,6 +174,8 @@ class CosmosSnapshotStreamReader(CosmosReaderBase, DataSourceStreamReader, _Avai
 
     def partitions(self, start: dict, end: dict) -> list[CosmosSnapshotStreamPartition]:
         end_offset = SnapshotStreamOffset.from_dict(end)
+        if start == end and self._latest_from_initial and not self._initial_requested:
+            raise CosmosConfigError(AVAILABLE_NOW_WRAPPER_UNSUPPORTED)
         self._known = end_offset
         if start == end:
             return []
@@ -200,54 +214,56 @@ class CosmosSnapshotStreamReader(CosmosReaderBase, DataSourceStreamReader, _Avai
         return self._with_budget(parts)
 
     def read(self, partition: InputPartition | None) -> Iterator[tuple[Any, ...]]:
-        if partition is None:
+        if is_empty_partition(partition):
             return
-        partition = cast(CosmosSnapshotStreamPartition, partition)
+        if not isinstance(partition, CosmosSnapshotStreamPartition):
+            raise unexpected_partition(partition)
         started = time.monotonic()
         opts = self._opts
         builder = self._row_builder(snapshot=True)
         pk = partition.pk
         stats = QueryStats()
         describe = f"snapshot {partition.snapshot_ts} of range {epk.range_key(partition.lo, partition.hi)}"
-        docs = query_documents(
-            self._backend(partition.token, partition),
-            opts.query,
-            opts.parameters_for_sdk(),
-            (partition.lo, partition.hi),
-            opts.page_size,
-            policy=self._retry_policy(),
-            stats=stats,
-            describe=describe,
-            session_token=partition.session_token,
-            pk=partition.pk,
-        )
-        rows = 0
-        for doc in docs:
-            if isinstance(doc, Mapping):
-                view = RecordView(
-                    doc,
-                    id=doc.get("id"),
-                    pk=pk.render(doc),
-                    feed_range=partition.feed_range,
-                    snapshot_ts=partition.snapshot_ts,
-                )
-            else:  # SELECT VALUE <scalar>
-                view = RecordView(None, feed_range=partition.feed_range, snapshot_ts=partition.snapshot_ts)
-                view.doc = doc
-            row = builder.build(view)
-            if row is not None:
-                rows += 1
-                yield row
-        self._log_metrics(
-            f"read of {describe}",
-            started,
-            rows=rows,
-            pages=stats.pages,
-            request_charge=stats.request_charge,
-            retries=stats.retries,
-            replans=stats.replans,
-            duplicates=stats.duplicates,
-        )
+        with self._task_backend(partition.token, partition) as backend:
+            docs = query_documents(
+                backend,
+                opts.query,
+                opts.parameters_for_sdk(),
+                (partition.lo, partition.hi),
+                opts.page_size,
+                policy=self._retry_policy(),
+                stats=stats,
+                describe=describe,
+                session_token=partition.session_token,
+                pk=partition.pk,
+            )
+            rows = 0
+            for doc in docs:
+                if isinstance(doc, Mapping):
+                    view = RecordView(
+                        doc,
+                        id=doc.get("id"),
+                        pk=pk.render(doc),
+                        feed_range=partition.feed_range,
+                        snapshot_ts=partition.snapshot_ts,
+                    )
+                else:  # SELECT VALUE <scalar>
+                    view = RecordView(None, feed_range=partition.feed_range, snapshot_ts=partition.snapshot_ts)
+                    view.doc = doc
+                row = builder.build(view)
+                if row is not None:
+                    rows += 1
+                    yield row
+            self._log_metrics(
+                f"read of {describe}",
+                started,
+                rows=rows,
+                pages=stats.pages,
+                request_charge=stats.request_charge,
+                retries=stats.retries,
+                replans=stats.replans,
+                duplicates=stats.duplicates,
+            )
 
     def commit(self, end: dict) -> None:
         if self._known is None:
