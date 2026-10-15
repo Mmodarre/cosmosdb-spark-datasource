@@ -212,8 +212,9 @@ def arrow_batches_supported() -> bool | None:
 def arrow_batches_by_default() -> bool:
     """Return whether ``arrow_batches=auto`` hands rows to Spark as record batches here.
 
-    Not where the Databricks engine runs the reader (serverless compute): its read worker's Arrow schema
-    for the output schema has not been verified against the one built here.
+    Not where the Databricks engine runs the reader (serverless compute): the engine's PySpark changes
+    with the platform, independently of this package, so the default does not rely on its read worker's
+    Arrow schema. ``arrow_batches=true`` is verified there (environments 2 to 5).
     """
     return not engine_loaded() and arrow_batches_supported() is True
 

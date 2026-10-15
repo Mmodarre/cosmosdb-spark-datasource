@@ -54,9 +54,9 @@ optionally `azure-identity`), which serverless environments and pipelines can in
 | Python | 3.10 to 3.13 | CI |
 | `azure-cosmos` | `>=4.14.0,<5` | CI: unit tests with the locked version, with 4.14.0 and with the latest 4.x; integration tests against both emulators with 4.14.0 and with the latest 4.x |
 | `azure-identity` (optional) | `>=1.19,<2` | unit tests only |
-| Databricks serverless | environment version 2 or later | manually, not in CI: environments 2 to 5, jobs and notebooks, with a pre-release build of 2026-10-14; environments 4 and 5 with commit 59c8bd1 |
-| Databricks classic compute | DBR 15.4 LTS or later | manually, not in CI: DBR 15.4, 16.4, 17.3 (dedicated and standard access mode), 18.3 and 19.x, with a pre-release build of 2026-10-14 and with commit 59c8bd1 |
-| Lakeflow SDP | DBR 18.3, serverless and classic | manually, not in CI, with pre-release builds of 2026-10-14 |
+| Databricks serverless | environment version 2 or later | manually, not in CI: environments 2 to 5, jobs and a notebook, on pre-release builds up to release candidate RC2 (commit 002b65d) |
+| Databricks classic compute | DBR 15.4 LTS or later | manually, not in CI: DBR 15.4, 16.4, 17.3 (dedicated and standard access mode), 18.3 and 19.x, on pre-release builds up to RC2 |
+| Lakeflow SDP | DBR 18.3, serverless and classic | manually, not in CI, on pre-release builds (0.2.0 to 0.3.1; RC2 for a pipeline with managed identity) |
 | OSS Spark 3.x | | not supported: the Python Data Source API starts with Spark 4.0 |
 
 Databricks runtimes built on Spark 3.5 from DBR 15.4 LTS (and serverless environments 2 and 3)
@@ -67,8 +67,9 @@ have it. Batch reads of documents hand rows to Spark as Arrow record batches on 
 later and on DBR 16.4 LTS and later; on DBR 15.4 LTS, whose read worker does not take them, and by
 default on serverless compute, they hand over tuples (`arrow_batches`).
 
-The manual runs on Databricks used pre-release builds; the changes made after commit 59c8bd1 are
-covered by CI only.
+The manual runs on Databricks used pre-release builds; the changes made after release candidate RC2
+(commit 002b65d) are covered by CI only. [docs/EVIDENCE.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/docs/EVIDENCE.md) lists what was tested on which
+build, the benchmark against the Azure Cosmos DB Spark connector, and the defects found.
 
 The integration tests run against two Cosmos DB emulators in CI (see
 [CONTRIBUTING.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/CONTRIBUTING.md#integration-tests)). Neither emulator has `AllVersionsAndDeletes`
@@ -255,14 +256,14 @@ failing; the default is `error`. An option that the read would accept without us
 |---|---|---|
 | `query` | `SELECT * FROM c` | Query run **per input partition**, for server-side filters and projections. `ORDER BY`, `GROUP BY`, `DISTINCT`, `TOP`, `OFFSET` and aggregates apply per partition, not globally (a WARNING says so): do them in Spark, or combine the per-partition results there, for example by summing the rows of `SELECT COUNT(1) AS n FROM c`. |
 | `query_parameters` | | JSON list of `{"name": "@p", "value": ...}` |
-| `page_size` | `5000` | Maximum items per request (the service also caps a page at about 4 MB). Pages of 5,000 cost about 7% fewer RU per document than pages of 1,000. |
+| `page_size` | `5000` | Maximum items per request (the service also caps a page at about 4 MB). Pages of 5,000 cost about 7% fewer RU per document than pages of 1,000, but use `1000` for reads limited by RU/s (see [Throughput control](#throughput-control)). |
 | `prefetch_pages` | `1` | Query pages fetched ahead, on one thread per task, while the current page is converted; `0` fetches on demand; at most `4` |
-| `arrow_batches` | `auto` | Hand rows to Spark as Arrow record batches of up to `page_size` rows. `auto`: on PySpark 4.0 or later and on Databricks Runtime 16.4 LTS or later (classic compute), not on DBR 15.4 LTS, whose read worker takes each batch for one row (`true` is rejected there), and not on serverless compute, where the engine's batch layout is not verified |
+| `arrow_batches` | `auto` | Hand rows to Spark as Arrow record batches of up to `page_size` rows. `auto`: on PySpark 4.0 or later and on Databricks Runtime 16.4 LTS or later (classic compute), not on DBR 15.4 LTS, whose read worker takes each batch for one row (`true` is rejected there), and not by default on serverless compute, where `arrow_batches=true` is verified (environments 2 to 5, rows identical to `false`, raw and typed) |
 | `partitions_per_feed_range` | `1` | Split every physical partition into N EPK sub-ranges, for N times more tasks. Each sub-range query scans its whole physical partition, so a full read costs about N times the RU of `1` (see [Sizing and performance](#sizing-and-performance)). N is 1 to 1024. `auto` lets the data source choose; it reads one task per physical partition, the same as `1`. |
 | `mode` | `PERMISSIVE` | Conversion errors: `PERMISSIVE` (null, plus the corrupt-record column), `DROPMALFORMED` or `FAILFAST` |
 | `raw_json_column` | `body` | Name of the column holding the whole document |
 | `corrupt_record_column` | `_corrupt_record` | Column that receives the JSON of malformed documents (only if it is in the schema) |
-| `log_metrics` | `false` | Log per-partition metrics (rows, pages, RU, retries, duration) at WARNING, so they appear in executor logs |
+| `log_metrics` | `false` | Log per-partition metrics (rows, pages, RU, retries, duration) at WARNING, so they appear in executor logs; also for `read_many` |
 | `slow_request_ms`, `slow_request_log_per_minute` | off, `10` | Log a WARNING for every page fetch slower than this, with activity ids, partitions, request charge, service-side duration and throttling retries; at most `slow_request_log_per_minute` lines per Python worker per minute (the number left out is reported). Batch, snapshot and change-feed reads. |
 | `max_integrated_cache_staleness_ms` | | Maximum staleness of results served by the [integrated cache](https://learn.microsoft.com/azure/cosmos-db/integrated-cache) of a dedicated gateway (queries; needs a dedicated-gateway endpoint and Session or Eventual consistency) |
 | `infer_schema` | `false` | Infer the schema from a sample of documents instead of returning raw JSON; batch reads only. See [Schema inference](#schema-inference). |
@@ -270,22 +271,44 @@ failing; the default is `error`. An option that the read would accept without us
 | `infer_system_properties`, `infer_timestamp` | `false` | Include `_rid`, `_self`, `_etag`, `_attachments` and `_ts` (`infer_timestamp`: `_ts` only) in the inferred schema |
 | `partition_key` | | Read one logical partition: the key as JSON (`"dev-1"`, `42`, `["tenant1","user7"]` or a prefix such as `["tenant1"]` of a hierarchical key); text that is not JSON is a string key. See [Logical partitions and point reads](#logical-partitions-and-point-reads). |
 | `item_ids` | | Read given documents: a JSON list of `["id", pk]` pairs or `{"id": ..., "pk": ...}` objects |
-| `filter_pushdown` | `false` | `true`: push Spark filters into the query (PySpark 4.1+; needs `spark.sql.python.filterPushdown.enabled=true`, else planning fails with `DATA_SOURCE_PUSHDOWN_DISABLED`). `auto`: push only while that conf is true. See [Filter pushdown](#filter-pushdown). |
+| `filter_pushdown` | `false` | `true`: push Spark filters into the query (PySpark 4.1+ or DBR 17.3 LTS+; needs `spark.sql.python.filterPushdown.enabled=true`, else planning fails with `DATA_SOURCE_PUSHDOWN_DISABLED`; rejected where the runtime has no pushdown API). `auto`: push only while that conf is true. Not available on serverless compute. See [Filter pushdown](#filter-pushdown). |
 
 ### Filter pushdown
 
 With `filter_pushdown=true` and the Spark conf `spark.sql.python.filterPushdown.enabled=true`, the
-filters of a batch read become part of the query, so the service returns only matching documents:
+filters of a batch read become part of the query, so the service returns only matching documents.
+The filtered columns must be in the schema, declared or inferred:
 
 ```python
 spark.conf.set("spark.sql.python.filterPushdown.enabled", "true")
 critical = (
     spark.read.format("cosmosdb")
+    .schema("id STRING, pk STRING, severity STRING, body STRING")
     .options(**conn, container="events", filter_pushdown="true")
     .load()
     .filter("severity = 'critical'")
 )
 ```
+
+Where pushdown is available:
+
+| Runtime | Pushdown |
+|---|---|
+| PySpark 4.1 and later; Databricks Runtime 17.3 LTS and later (classic compute) | yes, with the Spark conf set (DBR 17.3 has the API through a Databricks back-port) |
+| OSS PySpark 4.0; Databricks Runtime 15.4 LTS | no: Spark has no pushdown API for Python data sources there; `filter_pushdown=true` fails with `CosmosConfigError`, `auto` reads without pushdown |
+| Databricks serverless compute | no: the Spark conf can be neither read nor set; `auto` reads without pushdown (a full scan) and `true` fails with `DATA_SOURCE_PUSHDOWN_DISABLED` |
+
+Where pushdown is not available, write the filter into `query`
+(`SELECT * FROM c WHERE c.severity = 'critical'`): the service then applies it. On serverless that
+read 13 RU instead of 437 for a 1% filter of 20,000 documents.
+
+> [!WARNING]
+> **One `load()` per filtered query.** Spark 4.1 to 4.3 store the read planned with pushed filters
+> on the loaded relation and reuse it for every other scan of that DataFrame or view: a later query
+> without pushable filters, or a union or self-join with different filters, reads only the
+> documents of the earlier filter and silently returns too few rows (a reused DataFrame returned 39
+> of 3,000 rows). Load a new DataFrame for each query that filters differently. (Spark's main
+> branch scopes the planned read to its scan.)
 
 - **Pushed**, each optionally negated: `=`, `<=>`, `<`, `<=`, `>`, `>=` and `IN` on STRING,
   integer and DOUBLE columns that are document properties (struct fields included), `=`, `<=>` and
@@ -304,11 +327,6 @@ critical = (
   4 s, where the full scan that Spark would filter costs 4,603 RU and 66 s.
 - **`query`** must be `SELECT * FROM <alias> [WHERE ...]`: the filters are added to its `WHERE`.
   Other queries (projections, `VALUE`, `JOIN`, `ORDER BY`, `TOP`, ...) push nothing; Spark filters.
-- **One `load()` per filtered query.** Spark 4.1 to 4.3 store the read planned with pushed filters
-  on the loaded relation and reuse it for every other scan of that DataFrame or view: a later query
-  without pushable filters, or a union or self-join with different filters, reads only the
-  documents of the earlier filter, and returns too few rows. Load a new DataFrame for each query
-  that filters differently. (Spark's main branch scopes the planned read to its scan.)
 - Not pushed: TIMESTAMP, DATE, DECIMAL, FLOAT, BINARY and complex-type columns, `body`,
   `feed_range`, hierarchical `pk`, integers beyond ±2^53, range comparisons on BOOLEAN columns and
   with strings containing characters from U+D800 up, `IS NULL` on nested fields and on non-STRING
@@ -317,9 +335,7 @@ critical = (
   projecting `query` instead.
 - Documents a pushed filter excludes are not converted, so with `FAILFAST` a malformed document
   that the filter excludes does not fail the read.
-- PySpark 4.0 has no pushdown API, and the option does nothing there. Where the conf cannot be set
-  (Databricks serverless restricts Spark confs), `auto` reads without pushdown and `true` fails.
-  The generated query is logged at INFO (without parameter values).
+- The generated query is logged at INFO (without parameter values).
 
 ### Logical partitions and point reads
 
@@ -342,10 +358,14 @@ events = read_many(wanted, id_column="id", pk_column="deviceId", **conn, contain
   documents cost 4.3 RU as one task; 1,000 `item_ids` cost 301 RU. A query scoped by the key's
   EPK range instead (`feed_range_from_partition_key`) scans the whole physical partition: 2,386 RU.
 - `read_many` takes the connection and conversion options (`mode`, `raw_json_column`,
-  `corrupt_record_column`) and `unknown_options`, and rejects the others. It returns the batch-read schema or `schema=`
-  (a `StructType` or DDL), runs as a `mapInArrow` over the identities (which needs pandas, as
-  Spark's `mapInArrow` does), and reads up to 1,000 identities per request. Repeated identities
-  are read once per Arrow batch.
+  `corrupt_record_column`), `log_metrics` and `unknown_options`, and rejects the others. It
+  returns the batch-read schema or `schema=` (a `StructType` or DDL), runs as a `mapInArrow` over
+  the identities (which needs pandas, as Spark's `mapInArrow` does), and reads up to 1,000
+  identities per request.
+- `read_many` reads each identity once: it removes repeated `(id, pk)` rows of the input
+  (`dropDuplicates`, one shuffle) before reading, so a repeated identity costs no extra RU and
+  returns one document. Rows with a null id are skipped. With `log_metrics=true` every task logs
+  the identities it read, the documents found and their request charge.
 - A prefix of a hierarchical key can span several physical partitions; the service then scans
   them.
 
@@ -786,11 +806,16 @@ snapshots = spark.readStream.format("cosmosdb").options(**conn, container="custo
   or below the budget however its tasks are spread, and tasks on one executor use each other's
   unused share; tasks that run in later waves get their share only then. Measured on an account:
   a 1,601 RU read capped at 20 RU/s ran at 18.8 RU/s (85 s; 11.6 s unthrottled).
+- **Use `page_size=1000` for reads limited by RU/s**: throttled by the service or capped by
+  `target_ru_per_second`. With the default 5,000-item pages such a read used only about 75% of the
+  provisioned throughput: a full read of 10M documents at 3,000 RU/s took 96 s with 5,000-item
+  pages and 74 s with 1,000-item pages (the Azure Cosmos DB Spark connector showed the same, 91 s
+  against 71 s). Reads that are not limited by RU/s are faster with the default.
 
 ```python
 gentle = (
     spark.read.format("cosmosdb")
-    .options(**conn, container="orders", target_ru_per_second="2000", priority="Low")
+    .options(**conn, container="orders", target_ru_per_second="2000", priority="Low", page_size="1000")
     .load()
 )
 ```
@@ -954,6 +979,8 @@ checkpoint unreadable. Log messages and the modules prefixed with `_` are not pa
 - [docs/PARITY.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/docs/PARITY.md): read-side parity with the Azure Cosmos DB Spark connector.
 - [docs/DESIGN.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/docs/DESIGN.md): SDK and PySpark findings, offsets, the determinism and
   initial-snapshot arguments, and the test strategy.
+- [docs/EVIDENCE.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/docs/EVIDENCE.md): the test evidence on local Spark, Databricks and a live account, the
+  benchmark against the Azure Cosmos DB Spark connector, and the defects found and fixed.
 - [CHANGELOG.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/CHANGELOG.md), [CONTRIBUTING.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/CONTRIBUTING.md), [RELEASING.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/RELEASING.md),
   [SECURITY.md](https://github.com/Mmodarre/cosmosdb-spark-datasource/blob/main/SECURITY.md).
 
