@@ -240,3 +240,18 @@ def test_read_many(spark) -> None:
     typed = read_many(wanted, pk_column="key", schema="id STRING, v BIGINT", container=store.name, **options)
     assert typed.schema.simpleString() == "struct<id:string,v:bigint>"
     assert sorted(tuple(r) for r in typed.distinct().collect()) == [("d1", 1), ("d2", 2)]
+
+
+def test_typed_reads_with_the_option_spark_connect_adds(spark) -> None:
+    # Databricks (serverless and classic) adds isUserSpecifiedSchema to the options of a read with
+    # .schema(...); OSS Spark, local Spark Connect included, does not, so it is passed here as Databricks does.
+    store = _store("spark_engine_option", docs=40)
+    typed = (
+        spark.read.format("cosmosdb")
+        .schema("id STRING, v BIGINT")
+        .options(**fake_options(store))
+        .option("query", "SELECT * FROM c WHERE c.v >= 10")
+        .option("isUserSpecifiedSchema", "true")
+        .load()
+    )
+    assert sorted(r.v for r in typed.collect()) == list(range(10, 40))

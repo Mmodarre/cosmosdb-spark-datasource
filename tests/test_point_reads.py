@@ -173,3 +173,4 @@ def test_read_many_function_reads_identity_batches(make_store, monkeypatch: pyte
         with pytest.raises(CosmosConfigError, match=f"does not take option\\(s\\) {name}"):
             readmany.read_many(Frame(), **fake_options(store), **{name: value})
     readmany.read_many(Frame(), **fake_options(store, priority="Low", mode="FAILFAST", slow_request_ms="500"))
+    readmany.read_many(Frame(), **fake_options(store, unknown_options="warn"), injected="x")
