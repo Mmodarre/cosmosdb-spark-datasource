@@ -74,8 +74,9 @@ First public release.
 - On PySpark 4.0 and 4.1 (Databricks Runtime 15.4 LTS to 17.3 LTS), `Trigger.AvailableNow` runs one
   micro-batch per run. The internal Spark conf `spark.sql.streaming.triggerAvailableNowWrapper.enabled`
   is not supported.
-- Filter pushdown needs a fresh `load()` per filtered query on Spark 4.1 to 4.3, and projections
-  are not pushed.
+- Filter pushdown needs a fresh `load()` per filtered query on Spark 4.1 to 4.3, is not available
+  on serverless compute (use `query`), and projections are not pushed.
+- Reads limited by RU/s are faster with `page_size=1000` than with the default 5,000.
 - Unity Catalog service credentials work only through a token minted on the driver
   (`auth_type=access_token`), which is not refreshed.
 - Arrow record batches are not used on Databricks Runtime 15.4 LTS, and not by default on
