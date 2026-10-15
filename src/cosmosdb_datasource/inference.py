@@ -2,7 +2,7 @@
 
 ``DataSource.schema()`` runs on the driver, once per ``load()``, and only when no schema was given, so
 the sample is read there: up to ``sampling_size`` results of ``sampling_query`` (default: the read's
-``query``), spread evenly over the physical partitions, which are read in parallel. A query read
+``query``), spread evenly over the physical partitions, which are read one after the other. A query read
 returns documents in ``_rid`` (insertion) order per partition, so the sample favours the oldest
 documents of every partition.
 
@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 from typing import Any
 
@@ -47,7 +46,6 @@ logger = logging.getLogger("cosmosdb_datasource")
 SYSTEM_PROPERTIES = ("_rid", "_self", "_etag", "_attachments")
 TIMESTAMP_PROPERTY = "_ts"
 _LONG_MIN, _LONG_MAX = -(2**63), 2**63 - 1
-_MAX_SAMPLING_THREADS = 16
 
 
 def value_type(value: Any) -> DataType:
@@ -175,8 +173,8 @@ def sample_documents(opts: CosmosOptions) -> tuple[list[Any], PartitionKeyInfo]:
         )
         return list(islice(docs, per_range))
 
-    with ThreadPoolExecutor(max_workers=max(1, min(_MAX_SAMPLING_THREADS, len(ranges)))) as pool:
-        samples = list(pool.map(sample, ranges))
+    # One range after the other: requests on a client are serialized anyway (SdkBackend).
+    samples = [sample(rng) for rng in ranges]
     return [doc for docs in samples for doc in docs][: opts.sampling_size], pk
 
 

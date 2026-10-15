@@ -17,6 +17,7 @@ SDK-specific behaviour in one place:
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -77,6 +78,18 @@ def _continuation(headers: Any) -> str | None:
     return headers.get("etag") if headers is not None else None
 
 
+def _query_continuation(headers: Any) -> str | None:
+    """Return the query continuation of one pager from its last response's headers.
+
+    The pager's ``continuation_token`` is read from the client-wide ``last_response_headers``
+    (``QueryIterable._unpack``), which a concurrent query on the shared client may have replaced
+    (azure-cosmos 4.14.0 to 4.17.1). The response's own headers hold the same token: the backend's
+    in 4.14.0, and the outbound token that 4.17.1 writes into the last response's headers after the
+    response hook received them.
+    """
+    return headers.get("x-ms-continuation") if headers is not None else None
+
+
 def _charge(headers: Any) -> float:
     try:
         return float(headers.get("x-ms-request-charge") or 0.0)
@@ -93,8 +106,17 @@ class SdkBackend:
         prefetch_pages: int = 0,
         cache_staleness_ms: int | None = None,
         slow_requests: SlowRequestLog | None = None,
+        sdk_lock: threading.RLock | None = None,
     ) -> None:
         self._container = container
+        # azure-cosmos clients are not safe for concurrent requests (4.14.0 to 4.17.1): every response
+        # replaces the client-wide ``last_response_headers``, which pagers read their continuation from,
+        # and 4.17.1 writes throttle counters into that object after each request while the query path
+        # copies it, which fails with "OrderedDict mutated during iteration". Requests on one client are
+        # therefore serialized, also across backends of different containers, which share the client's
+        # lock. The read-ahead thread holds it only while it fetches a page. Change-feed position probes
+        # are the exception (see ``_probe``).
+        self._sdk_lock = sdk_lock if sdk_lock is not None else threading.RLock()
         self._priority = priority
         self._prefetch_pages = prefetch_pages
         self._cache_staleness_ms = cache_staleness_ms
@@ -106,7 +128,8 @@ class SdkBackend:
 
     def properties(self, refresh: bool = False) -> dict[str, Any]:
         if self._properties is None or refresh:
-            self._properties = dict(self._container.read())
+            with self._sdk_lock:
+                self._properties = dict(self._container.read())
         return self._properties
 
     @property
@@ -115,7 +138,14 @@ class SdkBackend:
 
     def feed_ranges(self, force_refresh: bool = False) -> list[tuple[str, str]]:
         ranges = []
-        for fr in self._container.read_feed_ranges(force_refresh=force_refresh):
+        if force_refresh:
+            with self._sdk_lock:
+                feed_ranges = list(self._container.read_feed_ranges(force_refresh=True))
+        else:
+            # Answered from the client's routing-map cache, so the per-page topology check of a query read
+            # does not wait for the read-ahead thread's fetch.
+            feed_ranges = list(self._container.read_feed_ranges(force_refresh=False))
+        for fr in feed_ranges:
             rng = fr["Range"]
             ranges.append((str(rng["min"]).upper(), str(rng["max"]).upper()))
         ranges.sort()
@@ -161,9 +191,15 @@ class SdkBackend:
         """Return the existing documents among ``(id, partition key)`` pairs, and the request charge."""
         responses: list[Any] = []
         started = time.monotonic()
-        docs = self._container.read_items(
-            items=items, response_hook=lambda headers, _body: responses.append(headers), **self._kwargs()
-        )
+        with self._sdk_lock:
+            # max_concurrency=1: the SDK would otherwise run the queries of one call in parallel on this
+            # client (azure-cosmos 4.14.0 to 4.17.1), which is unsafe (see __init__).
+            docs = self._container.read_items(
+                items=items,
+                max_concurrency=1,
+                response_hook=lambda headers, _body: responses.append(headers),
+                **self._kwargs(),
+            )
         if self._slow is not None:
             self._slow.observe("read_items", time.monotonic() - started, responses, items=len(items))
         return [dict(d) for d in docs], sum(_charge(h) for h in responses)
@@ -174,7 +210,8 @@ class SdkBackend:
 
     def key_range(self, partition_key: Any) -> tuple[str, str]:
         """Return the EPK range of a partition key value or of a prefix of a hierarchical key."""
-        rng = self._container.feed_range_from_partition_key(partition_key)["Range"]
+        with self._sdk_lock:
+            rng = self._container.feed_range_from_partition_key(partition_key)["Range"]
         return str(rng["min"]).upper(), str(rng["max"]).upper()
 
     def _query_pages(
@@ -206,12 +243,17 @@ class SdkBackend:
             kwargs["session_token"] = session_token
         if self._cache_staleness_ms is not None:
             kwargs["max_integrated_cache_staleness_in_ms"] = self._cache_staleness_ms
-        pager = self._container.query_items(
-            query=query, max_item_count=page_size, response_hook=hook, **scope, **kwargs
-        )
-        pages = pager.by_page(continuation_token=continuation) if continuation else pager.by_page()
+        with self._sdk_lock:
+            pager = self._container.query_items(
+                query=query, max_item_count=page_size, response_hook=hook, **scope, **kwargs
+            )
+            pages = pager.by_page(continuation_token=continuation) if continuation else pager.by_page()
         fetch_started = time.monotonic()
-        for page in pages:
+        while True:
+            with self._sdk_lock:
+                page = next(pages, None)
+            if page is None:
+                return
             items = list(page)
             if self._slow is not None:
                 rng = scope.get("feed_range", {}).get("Range")
@@ -221,7 +263,7 @@ class SdkBackend:
                 )
             yield QueryPage(
                 items=items,
-                continuation=pages.continuation_token,
+                continuation=_query_continuation(responses[-1] if responses else None),
                 request_charge=sum(charges),
                 partitions=tuple(served),
                 server_time=next((t for t in times if t is not None), None),
@@ -254,12 +296,17 @@ class SdkBackend:
             self.ensure_rid(container_rid)
         rid = container_rid or self.rid
         token = resume_token or build_continuation(rid, mode, rng[0], rng[1], start_lsn)
-        pager = self._container.query_items_change_feed(
-            continuation=token, max_item_count=page_size, response_hook=hook, **self._kwargs()
-        )
-        pages = pager.by_page()
+        with self._sdk_lock:
+            pager = self._container.query_items_change_feed(
+                continuation=token, max_item_count=page_size, response_hook=hook, **self._kwargs()
+            )
+            pages = pager.by_page()
         fetch_started = time.monotonic()
-        for page in pages:
+        while True:
+            with self._sdk_lock:
+                page = next(pages, None)
+            if page is None:
+                break
             items = list(page)
             if self._slow is not None:
                 self._slow.observe(
@@ -298,11 +345,16 @@ class SdkBackend:
                 f"The container was re-created after this micro-batch was planned (planned rid={rid!r}, "
                 f"current rid={current!r}). Start the stream with a new checkpoint location."
             )
-        self._container.read_feed_ranges(force_refresh=True)
+        with self._sdk_lock:
+            self._container.read_feed_ranges(force_refresh=True)
 
     def _probe(
         self, rng: tuple[str, str], mode: str, start_time: str | datetime, *, want_positions: bool = False
     ) -> tuple[list[dict[str, Any]], list[int], list[Any], str | None]:
+        # Not serialized: the driver probes every range in parallel (stream._parallel_map), and the
+        # change-feed request path does not copy response headers (no ``response_headers`` argument in
+        # azure-cosmos 4.14.0 to 4.17.1), so concurrent probes cannot fail that way; each reads its
+        # position from its own responses. No query runs on the client while a stream plans.
         etags: list[Any] = []
         sessions: list[str] = []
         last: list[Any] = [None]

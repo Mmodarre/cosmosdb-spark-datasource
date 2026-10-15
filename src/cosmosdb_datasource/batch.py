@@ -134,6 +134,7 @@ def query_documents(
     refresh = False
     attempt = 0
     stalled = 0
+    mutations = 0
     try:
         while scopes:
             scope = scopes[0]
@@ -189,6 +190,11 @@ def query_documents(
                     continue
                 scopes.popleft()
             except Exception as exc:
+                if retry.is_concurrent_header_mutation(exc) and mutations < retry.MAX_CONCURRENT_MUTATION_RETRIES:
+                    mutations += 1
+                    stats.retries += 1
+                    retry.log_retry(f"querying {describe}", mutations, retry.MAX_CONCURRENT_MUTATION_RETRIES, 0.0, exc)
+                    continue
                 if not retry.is_transient(exc):
                     raise
                 attempt += 1
