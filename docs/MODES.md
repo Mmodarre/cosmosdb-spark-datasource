@@ -519,6 +519,10 @@ sequence_by = struct(CASE WHEN operation = 'snapshot' THEN 0 ELSE 1 END, lsn, ls
   across partition splits (observed during live splits), and `lsn_seq`, the position among the
   changes of the same document with the same LSN.
 - Without snapshot rows (modes 2 and 3): `struct(lsn, lsn_seq)`.
+- Changing the `sequence_by` of an existing AUTO CDC target, for example to add `lsn_seq`, fails
+  with `DATATYPE_MISMATCH ... __DeleteVersion` until the target is fully refreshed. Rows written
+  before a stream read `lsn_seq` have it NULL, and a plain Delta streaming sink needs `mergeSchema`
+  to take the new column.
 
 Several changes of one document share an LSN in two cases, and only the feed order tells them apart:
 

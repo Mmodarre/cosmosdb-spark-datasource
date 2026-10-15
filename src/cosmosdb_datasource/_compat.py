@@ -1,10 +1,9 @@
 """Bridge between the PySpark build that *runs* the data source and the one user code imports.
 
-On Databricks serverless (Spark 4.2.0 server, environment version 4) the Python data source
-workers run the engine's own PySpark, shipped as the package ``_engine_pyspark`` (``__version__``
-4.4.0.dev0), while ``import pyspark`` in the *same* process resolves to the environment's client
-PySpark (databricks-connect, 4.0.0). Classes therefore exist twice and ``isinstance`` across the
-two copies is false. Two consequences are handled here:
+On Databricks serverless the Python data source workers run the engine's own PySpark, shipped as
+the package ``_engine_pyspark``, while ``import pyspark`` in the *same* process resolves to the
+environment's client PySpark (databricks-connect), an older version. Classes therefore exist twice and
+``isinstance`` across the two copies is false. Two consequences are handled here:
 
 * **Schemas.** The engine's batch planner converts the output schema to the client's classes
   before calling ``DataSource.reader()``, but its streaming source runner passes an *engine*

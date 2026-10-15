@@ -15,8 +15,8 @@ reconciles a target table with its container. Each pipeline implements one patte
 The job `cosmos_reconcile` compares a container with a target table: missing, extra and stale
 keys.
 
-These patterns ran on Databricks serverless SDP (DBR 18.3) in an earlier form of this bundle; this
-generic version has not been deployed as is.
+The same patterns have run on Databricks serverless SDP (DBR 18.3); this generic bundle has not
+been deployed as is.
 
 ## Layout
 
@@ -57,7 +57,7 @@ Required, without defaults:
 
 Optional (see `databricks.yml` for all of them): the schema names, `customers_container` and
 `orders_container` (defaults `customers` and `orders`), `datasource_package` (default
-`cosmosdb-spark-datasource~=0.3.1`; a wheel path in a Unity Catalog volume also works),
+`cosmosdb-spark-datasource~=1.0`; a wheel path in a Unity Catalog volume also works),
 `auth_type` and the secret key names, `partitions_per_feed_range`, `priority` and
 `max_items_per_trigger`.
 
@@ -84,7 +84,7 @@ The endpoint is always read from the secret scope (key `secret_key_endpoint`, de
 |---|---|
 | `key` (default) | the account key in the scope (key `secret_key_account_key`, default `account-key`) |
 | `service_principal` | `tenant_id`, and the client id and secret in the scope (`client-id`, `client-secret`) |
-| `service_credential` | `service_credential`, the name of a Unity Catalog service credential. The pipeline source mints a token from it on the driver and passes it as `access_token`; it is not refreshed, so an update must end within about one hour. |
+| `service_credential` | `service_credential`, the name of a Unity Catalog service credential. The pipeline source mints a token from it on the driver and passes it as `access_token` with its `expires_on`; it is not refreshed, so an update must end before it expires (about 24 hours observed). |
 | `default` | an identity that `DefaultAzureCredential` finds on the compute; on Databricks it finds none (see the [README](../../README.md#authentication)) |
 
 Entra ID identities need a Cosmos DB data-plane role (for example *Cosmos DB Built-in Data

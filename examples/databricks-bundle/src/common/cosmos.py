@@ -87,8 +87,8 @@ def _auth_options(spark: Any, scope: str, endpoint: str) -> dict[str, str]:
         }
     if auth_type == "service_credential":
         # The data source cannot resolve a service credential where Spark plans its reads, so the
-        # token is minted here, on the driver. It is not refreshed: an update must end within its
-        # lifetime (about one hour).
+        # token is minted here, on the driver. It is not refreshed: an update must end before its
+        # expires_on (about 24 hours observed for service-credential tokens).
         name = optional_conf(spark, "cosmos.service_credential")
         if name is None:
             raise ValueError("auth_type=service_credential needs the bundle variable service_credential.")

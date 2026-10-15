@@ -130,9 +130,6 @@ def pushdown_options(store, **extra: str) -> dict[str, str]:
     return fake_options(store, filter_pushdown="true", **extra)
 
 
-# --------------------------------------------------------------------------------------- query parsing
-
-
 @pytest.mark.parametrize(
     ("query", "parts"),
     [
@@ -174,9 +171,6 @@ def test_simple_queries_are_parsed(query: str, parts: tuple[str, str, str | None
 )
 def test_other_queries_are_not_combined(query: str) -> None:
     assert parse_simple_query(query) is None
-
-
-# --------------------------------------------------------------------------------------- translation
 
 
 def translator(pk: PartitionKeyInfo | None = None, reserved: tuple[str, ...] = ()) -> Translator:
@@ -289,9 +283,6 @@ def test_fake_where_semantics() -> None:
     assert returns("c.a > 'B'", {"a": "a"})
 
 
-# --------------------------------------------------------------------------------------- the reader
-
-
 def test_reader_selection(make_store) -> None:
     store = make_store()
     default = make_source(fake_options(store))
@@ -381,8 +372,6 @@ def test_partition_key_is_read_only_for_pk_filters(make_store, no_sleep) -> None
     store.throttle_calls["properties"] = 0
     assert list(reader.pushFilters([EqualTo(("pk",), "p1")])) == []
 
-
-# ----------------------------------------------------------------------------- equivalence with Spark
 
 STRINGS = ["a", "ab", "b", "B", "", "5", "true", "null", "é", "\ue000x", "x\U0001f600"]
 NUMBERS = [-1, 0, 2, 3, 2.0, 2.5, 1e20, 2**60]

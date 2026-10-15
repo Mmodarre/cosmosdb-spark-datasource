@@ -1,7 +1,7 @@
 """Regression tests for Databricks serverless, where the engine PySpark differs from ``pyspark``.
 
-Observed on serverless: data source workers run ``_engine_pyspark`` 4.4.0.dev0 while
-``import pyspark`` resolves to the environment's client PySpark 4.0.0. The streaming runner then
+On serverless compute, data source workers run the engine's own PySpark, ``_engine_pyspark``, while
+``import pyspark`` resolves to the environment's older client PySpark. The streaming runner then
 
 * passes an engine ``StructType`` to ``DataSource.streamReader()`` (left unconverted, it fails with
   ``Spark type string is not supported by the cosmosdb source``), and
@@ -251,14 +251,14 @@ class SupportsTriggerAvailableNow(ABC):
 _SIMULATION = r"""
 import dataclasses, importlib.util, inspect, json, os, pickle, sys
 
-# 1. Client PySpark looks like 4.0: no streaming admission-control module, no 4.2 base methods.
+# Client PySpark looks like 4.0: no streaming admission-control module, no 4.2 base methods.
 from pyspark.sql import datasource as client_ds   # (4.2's module imports the streaming API itself)
 sys.modules["pyspark.sql.streaming.datasource"] = None
 for name in ("getDefaultReadLimit", "reportLatestOffset"):
     if name in vars(client_ds.DataSourceStreamReader):
         delattr(client_ds.DataSourceStreamReader, name)
 
-# 2. The engine package is loaded first, as in a Databricks data source worker.
+# The engine package is loaded first, as in a Databricks data source worker.
 import _engine_pyspark.sql.streaming.datasource as engine
 import pyspark.sql.types as client_types
 spec = importlib.util.spec_from_file_location("_engine_types", client_types.__file__)

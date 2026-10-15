@@ -55,7 +55,7 @@ def assert_each_live_document_once(store, rows) -> None:
 
 
 def test_the_fake_reproduces_the_sdk_restart() -> None:
-    """Without the package's split handling, a range read across a split returns rows twice (QA-06)."""
+    """Without the package's split handling, a range read across a split returns rows twice."""
     from tests.fake_cosmos import FakeCosmosStore
 
     store = FakeCosmosStore("restart-probe", partitions=1).register()

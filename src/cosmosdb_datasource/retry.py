@@ -3,8 +3,9 @@
 The SDK already retries 429 (``ResourceThrottleRetryPolicy``: default 9 attempts / 30 s
 cumulative wait, honouring ``x-ms-retry-after-ms``), 503, 408/5xx and connection errors
 (``azure/cosmos/_retry_utility.py``). Long scans of large containers can still exhaust those
-budgets under sustained throttling, so page iteration is wrapped in a second, slower layer that
-resumes from the last fully consumed page's continuation token. Driver-side metadata calls
+budgets under sustained throttling, so page iteration is wrapped in a second layer, with exponential
+backoff unless the error carries a retry-after hint, that resumes from the last fully consumed page's
+continuation token. Driver-side metadata calls
 (container properties, feed ranges, change-feed position probes) use the same policy through
 :func:`call_with_retry`, so throttling caused by concurrent reads does not fail query planning.
 """
