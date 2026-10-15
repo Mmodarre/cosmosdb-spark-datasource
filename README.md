@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/workflows/ci.yml)
 [![Integration](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/workflows/integration.yml/badge.svg?branch=main)](https://github.com/Mmodarre/cosmosdb-spark-datasource/actions/workflows/integration.yml)
+[![Coverage](https://codecov.io/gh/Mmodarre/cosmosdb-spark-datasource/graph/badge.svg?branch=main)](https://codecov.io/gh/Mmodarre/cosmosdb-spark-datasource)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 A PySpark data source for **Azure Cosmos DB for NoSQL**, written in Python on the PySpark Python
