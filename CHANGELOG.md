@@ -23,8 +23,9 @@ First public release.
 - Opt-in filter pushdown for batch reads (`filter_pushdown`, PySpark 4.1 and later or Databricks
   Runtime 17.3 LTS and later, with `spark.sql.python.filterPushdown.enabled=true`): Spark's filters
   become parameterized `WHERE` predicates of the query, and Spark re-applies every filter the
-  service cannot evaluate exactly. `filter_pushdown=true` fails where the runtime has no pushdown
-  API (OSS PySpark 4.0, DBR 15.4 LTS) instead of reading without it.
+  service cannot evaluate exactly. `filter_pushdown=true` fails where the runtime does not push
+  filters to Python data sources (OSS PySpark 4.0, DBR 15.4 LTS and 16.4 LTS) instead of reading
+  without them.
 - Logical-partition and point reads: `partition_key`, `item_ids`, and `read_many(identities)` for a
   DataFrame of `(id, pk)` rows, which reads each identity once and logs its request charge with
   `log_metrics`; pushed `pk = 'v'` and `pk IN (...)` filters with string keys on a

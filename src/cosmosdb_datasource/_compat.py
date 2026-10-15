@@ -168,25 +168,12 @@ def engine_loaded() -> bool:
     return ENGINE_PACKAGE in sys.modules
 
 
-def filter_pushdown_supported() -> bool | None:
-    """Return whether the PySpark that runs the reader has the filter pushdown API; None if it cannot tell.
-
-    Spark only pushes filters to a reader through ``DataSourceReader.pushFilters``: PySpark 4.1 and later
-    have it, and so does Databricks Runtime 17.3 LTS through a back-port, while OSS PySpark 4.0 and DBR
-    15.4 LTS do not. Absent means known unsupported; a module that cannot be inspected means unknown.
-    """
-    name = f"{ENGINE_PACKAGE}.sql.datasource" if engine_loaded() else "pyspark.sql.datasource"
-    try:
-        reader = getattr(importlib.import_module(name), "DataSourceReader", None)
-    except ImportError:
-        return None
-    return hasattr(reader, "pushFilters") if isinstance(reader, type) else None
-
-
 # The read worker accepts pyarrow.RecordBatch from read() from PySpark 4.0 (SPARK-48493), and on
 # Databricks Runtime 16.4 LTS, whose PySpark is 3.5.2. On DBR 15.4 LTS (PySpark 3.5.0) it takes each
 # batch for one row and fails with DATA_SOURCE_RETURN_SCHEMA_MISMATCH.
 ARROW_BATCHES_MINIMUM_DBR = (16, 4)
+# DBR 16.4 LTS defines DataSourceReader.pushFilters, but its engine never calls it; 17.3 LTS does.
+FILTER_PUSHDOWN_MINIMUM_DBR = (17, 3)
 _DBR_VERSION = re.compile(r"^(\d+)\.(\d+)")
 
 
@@ -194,6 +181,26 @@ def databricks_runtime() -> tuple[int, int] | None:
     """Return the classic Databricks Runtime version (``DATABRICKS_RUNTIME_VERSION``), or None."""
     match = _DBR_VERSION.match(os.environ.get("DATABRICKS_RUNTIME_VERSION", ""))
     return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def filter_pushdown_supported() -> bool | None:
+    """Return whether Spark pushes filters to this reader; None if it cannot tell.
+
+    Spark pushes filters only through ``DataSourceReader.pushFilters``, which OSS PySpark 4.0 and DBR
+    15.4 LTS lack. A classic Databricks Runtime below 17.3 LTS never calls it, even where it is defined.
+    """
+    if engine_loaded():
+        name = f"{ENGINE_PACKAGE}.sql.datasource"
+    else:
+        runtime = databricks_runtime()
+        if runtime is not None and runtime < FILTER_PUSHDOWN_MINIMUM_DBR:
+            return False
+        name = "pyspark.sql.datasource"
+    try:
+        reader = getattr(importlib.import_module(name), "DataSourceReader", None)
+    except ImportError:
+        return None
+    return hasattr(reader, "pushFilters") if isinstance(reader, type) else None
 
 
 def arrow_batches_supported() -> bool | None:

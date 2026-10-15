@@ -271,7 +271,7 @@ failing; the default is `error`. An option that the read would accept without us
 | `infer_system_properties`, `infer_timestamp` | `false` | Include `_rid`, `_self`, `_etag`, `_attachments` and `_ts` (`infer_timestamp`: `_ts` only) in the inferred schema |
 | `partition_key` | | Read one logical partition: the key as JSON (`"dev-1"`, `42`, `["tenant1","user7"]` or a prefix such as `["tenant1"]` of a hierarchical key); text that is not JSON is a string key. See [Logical partitions and point reads](#logical-partitions-and-point-reads). |
 | `item_ids` | | Read given documents: a JSON list of `["id", pk]` pairs or `{"id": ..., "pk": ...}` objects |
-| `filter_pushdown` | `false` | `true`: push Spark filters into the query (PySpark 4.1+ or DBR 17.3 LTS+; needs `spark.sql.python.filterPushdown.enabled=true`, else planning fails with `DATA_SOURCE_PUSHDOWN_DISABLED`; rejected where the runtime has no pushdown API). `auto`: push only while that conf is true. Not available on serverless compute. See [Filter pushdown](#filter-pushdown). |
+| `filter_pushdown` | `false` | `true`: push Spark filters into the query (PySpark 4.1+ or DBR 17.3 LTS+; needs `spark.sql.python.filterPushdown.enabled=true`, else planning fails with `DATA_SOURCE_PUSHDOWN_DISABLED`; rejected where the runtime does not push filters: OSS PySpark 4.0, DBR 15.4 and 16.4). `auto`: push only while that conf is true. Not available on serverless compute. See [Filter pushdown](#filter-pushdown). |
 
 ### Filter pushdown
 
@@ -295,7 +295,7 @@ Where pushdown is available:
 | Runtime | Pushdown |
 |---|---|
 | PySpark 4.1 and later; Databricks Runtime 17.3 LTS and later (classic compute) | yes, with the Spark conf set (DBR 17.3 has the API through a Databricks back-port) |
-| OSS PySpark 4.0; Databricks Runtime 15.4 LTS | no: Spark has no pushdown API for Python data sources there; `filter_pushdown=true` fails with `CosmosConfigError`, `auto` reads without pushdown |
+| OSS PySpark 4.0; Databricks Runtime 15.4 LTS and 16.4 LTS | no: Spark does not push filters to Python data sources there (DBR 16.4 defines `pushFilters` but never calls it); `filter_pushdown=true` fails with `CosmosConfigError`, `auto` reads without pushdown |
 | Databricks serverless compute | no: the Spark conf can be neither read nor set; `auto` reads without pushdown (a full scan) and `true` fails with `DATA_SOURCE_PUSHDOWN_DISABLED` |
 
 Where pushdown is not available, write the filter into `query`

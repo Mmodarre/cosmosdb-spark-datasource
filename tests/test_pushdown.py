@@ -310,19 +310,32 @@ def test_reader_selection(make_store) -> None:
 
 
 @pytest.mark.parametrize(
-    ("client", "engine", "supported"),
+    ("client", "engine", "runtime", "supported"),
     [
-        (True, None, True),  # PySpark 4.1+, or DBR 17.3 with its back-port
-        (False, None, False),  # OSS PySpark 4.0, DBR 15.4 LTS
-        (False, True, True),  # serverless: the engine's PySpark runs the reader
-        (True, False, False),
-        (True, "missing", None),  # the engine's module cannot be inspected
+        (True, None, None, True),  # PySpark 4.1+
+        (False, None, None, False),  # OSS PySpark 4.0
+        (False, None, "15.4", False),  # DBR 15.4 LTS: no pushFilters
+        (True, None, "16.4", False),  # DBR 16.4 LTS: pushFilters is defined but never called
+        (True, None, "17.3", True),  # DBR 17.3 LTS: its back-port pushes
+        (False, None, "17.3", False),
+        (True, None, "18.0", True),
+        (True, None, "client.5.12", True),  # not a classic version number: the attribute decides
+        (False, None, "client.5.12", False),
+        (False, True, None, True),  # serverless: the engine's PySpark runs the reader
+        (False, True, "16.4", True),  # with the engine loaded, the version is ignored
+        (True, False, None, False),
+        (True, "missing", None, None),  # the engine's module cannot be inspected
     ],
 )
-def test_the_pushdown_api_of_the_running_pyspark(monkeypatch, client, engine, supported) -> None:
+def test_the_pushdown_api_of_the_running_pyspark(monkeypatch, client, engine, runtime, supported) -> None:
     import sys
 
     from pyspark.sql import datasource as client_module
+
+    if runtime is None:
+        monkeypatch.delenv("DATABRICKS_RUNTIME_VERSION", raising=False)
+    else:
+        monkeypatch.setenv("DATABRICKS_RUNTIME_VERSION", runtime)
 
     class Reader:
         pass
@@ -350,7 +363,8 @@ def test_filter_pushdown_true_fails_where_spark_cannot_push(make_store, monkeypa
     true, auto = make_source(pushdown_options(store)), make_source(fake_options(store, filter_pushdown="auto"))
     schema = true.schema()
     if supported is False:
-        with pytest.raises(CosmosConfigError, match=r"filter_pushdown=true needs .*pushFilters.*'query'"):
+        message = r"does not push filters to Python data sources; PySpark 4\.1 .*17\.3 LTS.*auto or false.*'query'"
+        with pytest.raises(CosmosConfigError, match=message):
             true.reader(schema)
     else:  # unknown: the reader is built as before
         assert isinstance(true.reader(schema), CosmosPushdownBatchReader)

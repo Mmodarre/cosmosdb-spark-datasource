@@ -151,7 +151,7 @@ def test_filter_pushdown_matches_spark_filtering(spark) -> None:
                 assert sorted(map(repr, load("true").filter(expr).collect())) == expected, expr
             assert sorted(map(repr, load("auto").filter(expr).collect())) == expected, expr
         if not supported:  # PySpark 4.0: Spark would never call pushFilters
-            with pytest.raises(Exception, match="filter_pushdown=true needs"):
+            with pytest.raises(Exception, match="does not push filters to Python data sources"):
                 load("true").collect()
         if supported:
             plan = load("auto").filter("id = 'd005' AND s = 'a'")._jdf.queryExecution().executedPlan().toString()
