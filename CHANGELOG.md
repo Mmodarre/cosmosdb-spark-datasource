@@ -52,7 +52,9 @@ First public release.
   (`arrow_batches`) and 5,000-item pages.
 - Option validation: an unknown option fails at `load()` with `CosmosConfigError`, naming the
   closest known option; an option that the read would accept without using it fails at `load()` or
-  when the read is planned.
+  when the read is planned. The options Spark and Databricks add (`path`, `paths`,
+  `isUserSpecifiedSchema`) are ignored, and `unknown_options=warn` logs unknown options instead of
+  failing, for a runtime that adds one more.
 - Runtimes: PySpark 4.0, 4.1 and 4.2 on Python 3.10 to 3.13; Databricks Runtime 15.4 LTS and later
   (dedicated and standard access mode), serverless environment version 2 and later, and Lakeflow
   Spark Declarative Pipelines; `azure-cosmos` 4.14.0 to the latest 4.x.

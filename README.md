@@ -202,9 +202,11 @@ own session.
 
 Option names are case-insensitive. An unknown option fails `load()` with `CosmosConfigError`,
 which names the closest known option (`initial_snapshots` gives "did you mean
-'initial_snapshot'?"); `path` and `paths`, which Spark adds for `.load(path)`, are ignored. An
-option that the read would accept without using it fails with `CosmosConfigError` as well, at
-`load()` or when Spark plans the read:
+'initial_snapshot'?"). The options that Spark and Databricks add to a read are ignored: `path` and
+`paths` (`.load(path)`), and `isUserSpecifiedSchema`, which Databricks adds with `.schema(...)`. If
+a runtime adds another option, `unknown_options=warn` logs unknown options at WARNING instead of
+failing; the default is `error`. An option that the read would accept without using it fails with
+`CosmosConfigError` as well, at `load()` or when Spark plans the read:
 
 - `query_parameters` without `query` or `sampling_query`; `slow_request_log_per_minute` without
   `slow_request_ms` above 0; `sampling_size`, `sampling_query`, `infer_system_properties` and
@@ -245,6 +247,7 @@ option that the read would accept without using it fails with `CosmosConfigError
 | `throttle_max_wait_seconds` | `60` | Cumulative SDK wait on 429 per request; `0` disables the SDK's 429 retries as well |
 | `max_retries` | `8` | Retries after the SDK gives up (408, 410, 429, 449, 500, 502, 503, 504, 404 with sub-status 1002, network errors). Reads resume from the last completed page. The driver's metadata requests use the same policy. |
 | `retry_max_backoff_seconds` | `60` | Cap of the exponential backoff (jittered; `x-ms-retry-after-ms` is honoured) |
+| `unknown_options` | `error` | `warn`: log unknown option names at WARNING instead of failing (see [Options](#options)) |
 
 ### Batch reads
 
@@ -339,7 +342,7 @@ events = read_many(wanted, id_column="id", pk_column="deviceId", **conn, contain
   documents cost 4.3 RU as one task; 1,000 `item_ids` cost 301 RU. A query scoped by the key's
   EPK range instead (`feed_range_from_partition_key`) scans the whole physical partition: 2,386 RU.
 - `read_many` takes the connection and conversion options (`mode`, `raw_json_column`,
-  `corrupt_record_column`) and rejects the others. It returns the batch-read schema or `schema=`
+  `corrupt_record_column`) and `unknown_options`, and rejects the others. It returns the batch-read schema or `schema=`
   (a `StructType` or DDL), runs as a `mapInArrow` over the identities (which needs pandas, as
   Spark's `mapInArrow` does), and reads up to 1,000 identities per request. Repeated identities
   are read once per Arrow batch.
@@ -908,7 +911,7 @@ throughput for that.
 
 | Message | Cause and fix |
 |---|---|
-| `Unknown cosmosdb option(s): ...` | A misspelled or unsupported option; the message names the closest known option |
+| `Unknown cosmosdb option(s): ...` | A misspelled or unsupported option; the message names the closest known option. If the runtime added the option, set `unknown_options=warn` and report the name |
 | `Option(s) ... have no effect here` | The read does not use the option (see [Options](#options)); remove it |
 | `arrow_batches=true does not work on Databricks Runtime 15.4` | Use `arrow_batches=auto` or `false` on DBR 15.x |
 | `spark.readStream.format('cosmosdb') needs the change-feed schema` | Set `change_feed_mode` on the stream |

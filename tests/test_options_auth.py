@@ -123,9 +123,40 @@ def test_unknown_options_are_rejected_with_a_suggestion(name: str, message: str)
         opts(account_key=KEY, **{name: "x"})
 
 
-def test_options_that_spark_adds_are_accepted() -> None:
-    opts(account_key=KEY, path="ignored")  # .load(path)
-    opts(account_key=KEY, paths='["a", "b"]')  # .load(path1, path2)
+@pytest.mark.parametrize(
+    "name",
+    [
+        "path",
+        "Path",  # .load(path)
+        "paths",
+        "PATHS",  # .load(path1, path2)
+        "isUserSpecifiedSchema",
+        "isuserspecifiedschema",
+        "ISUSERSPECIFIEDSCHEMA",  # Spark Connect on Databricks serverless, with .schema(...)
+    ],
+)
+def test_options_that_the_engine_adds_are_accepted(name: str, caplog: pytest.LogCaptureFixture) -> None:
+    from tests.conftest import fake_options
+    from tests.fake_cosmos import FakeCosmosStore
+    from tests.harness import make_source
+
+    with caplog.at_level(logging.WARNING, logger="cosmosdb_datasource"):
+        assert opts(account_key=KEY, **{name: "true"}).endpoint == BASE["endpoint"]
+        make_source(fake_options(FakeCosmosStore("engine-options"), **{name: "true"}))  # as Spark passes them
+    assert caplog.text == ""
+
+
+def test_unknown_options_can_be_logged_instead(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="cosmosdb_datasource"):
+        o = opts(account_key=KEY, unknown_options="WARN", injectedByRuntime="x", partiton_key="p")
+    assert o.partition_key is None  # an unknown name is ignored, also one that looks like a known option
+    assert "'injectedbyruntime'" in caplog.text and "did you mean 'partition_key'?" in caplog.text
+    with pytest.raises(CosmosConfigError, match="set unknown_options=warn"):
+        opts(account_key=KEY, injectedByRuntime="x")
+    with pytest.raises(CosmosConfigError, match="set unknown_options=warn"):
+        opts(account_key=KEY, unknown_options="error", injectedByRuntime="x")
+    with pytest.raises(CosmosConfigError, match="'unknown_options' must be error or warn"):
+        opts(account_key=KEY, unknown_options="ignore")
 
 
 def test_timeouts_take_fractions_of_a_second() -> None:

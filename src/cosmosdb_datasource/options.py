@@ -165,10 +165,16 @@ READ_OPTIONS = (
     "infer_system_properties",
     "infer_timestamp",
 )
-# Spark adds "path" for .load(path) and "paths" for .load(path1, path2); the data source ignores them.
-SPARK_PATH_OPTIONS = ("path", "paths")
-PUBLIC_OPTIONS = frozenset({*CONNECTION_OPTIONS, *CONVERSION_OPTIONS, *READ_OPTIONS})
-KNOWN_OPTIONS = frozenset({*PUBLIC_OPTIONS, *SPARK_PATH_OPTIONS, TEST_BACKEND_OPTION})
+# How an unknown option name is handled: "error" (the default) or "warn", for a runtime that adds an option
+# the data source does not know yet.
+VALIDATION_OPTIONS = ("unknown_options",)
+UNKNOWN_OPTIONS_MODES = ("error", "warn")
+# Option names that Spark or the Databricks engine add to the user's options, accepted and ignored (lower
+# case, as the options are compared): "path" for .load(path), "paths" for .load(path1, path2), and
+# "isuserspecifiedschema", which Spark Connect on Databricks serverless adds with .schema(...).
+ENGINE_OPTIONS = frozenset({"path", "paths", "isuserspecifiedschema"})
+PUBLIC_OPTIONS = frozenset({*CONNECTION_OPTIONS, *CONVERSION_OPTIONS, *READ_OPTIONS, *VALIDATION_OPTIONS})
+KNOWN_OPTIONS = frozenset({*PUBLIC_OPTIONS, *ENGINE_OPTIONS, TEST_BACKEND_OPTION})
 
 # Options that a kind of read accepts but does not use (see unused_options).
 _QUERY_PAGE_OPTIONS = ("prefetch_pages", "max_integrated_cache_staleness_ms")
@@ -205,13 +211,27 @@ def _suggestion(name: str) -> str | None:
     return close[0] if close else None
 
 
-def _unknown(names: list[str]) -> CosmosConfigError:
+def _describe_unknown(names: list[str]) -> str:
     described = []
     for name in names:
         suggestion = _suggestion(name)
         described.append(f"{name!r} (did you mean {suggestion!r}?)" if suggestion else repr(name))
-    return CosmosConfigError(
-        f"Unknown cosmosdb option(s): {', '.join(described)}. Option names are case-insensitive; the README lists them."
+    return ", ".join(described)
+
+
+def _check_unknown(opts: dict[str, str]) -> None:
+    raw = (opts.get("unknown_options") or "error").strip().lower()
+    if raw not in UNKNOWN_OPTIONS_MODES:
+        raise CosmosConfigError(f"Option 'unknown_options' must be error or warn, got {opts['unknown_options']!r}.")
+    unknown = sorted(k for k in opts if k not in KNOWN_OPTIONS)
+    if not unknown:
+        return
+    if raw == "warn":
+        logger.warning("Ignoring unknown cosmosdb option(s) (unknown_options=warn): %s.", _describe_unknown(unknown))
+        return
+    raise CosmosConfigError(
+        f"Unknown cosmosdb option(s): {_describe_unknown(unknown)}. Option names are case-insensitive; the README "
+        "lists them. If the runtime added the option, set unknown_options=warn to log it instead."
     )
 
 
@@ -716,9 +736,7 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
     """Validate raw Spark options and return a typed, immutable configuration."""
     opts = _normalize(options)
 
-    unknown = sorted(k for k in opts if k not in KNOWN_OPTIONS)
-    if unknown:
-        raise _unknown(unknown)
+    _check_unknown(opts)
     given = frozenset(k for k in opts if _get(opts, k) is not None)
 
     endpoint = _get(opts, "endpoint")
