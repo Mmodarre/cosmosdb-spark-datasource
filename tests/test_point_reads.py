@@ -86,9 +86,11 @@ def test_item_ids_take_no_pushed_filters(make_store) -> None:
     store = make_store(partitions=2)
     load(store)
     filters = [EqualTo(("id",), "d1")]
-    opts = fake_options(store, filter_pushdown="true", item_ids=json.dumps([["d1", "p1"], ["d2", "p2"]]))
-    rows, _parts, remaining = run_batch_with_filters(opts, SCHEMA, filters)
-    assert remaining == filters and len(rows) == 2  # Spark applies the filter to the point reads
+    item_ids = json.dumps([["d1", "p1"], ["d2", "p2"]])
+    rows, _parts, _remaining = run_batch_with_filters(fake_options(store, item_ids=item_ids), SCHEMA, None)
+    assert len(rows) == 2
+    with pytest.raises(CosmosConfigError, match="filter_pushdown have no effect"):
+        run_batch_with_filters(fake_options(store, filter_pushdown="true", item_ids=item_ids), SCHEMA, filters)
 
 
 def test_many_item_ids_are_planned_by_partition(make_store) -> None:
@@ -167,3 +169,7 @@ def test_read_many_function_reads_identity_batches(make_store, monkeypatch: pyte
         readmany.read_many(Frame(), **fake_options(store, partition_key="p1"))
     with pytest.raises(CosmosConfigError, match="does not take"):
         readmany.read_many(Frame(), **fake_options(store), Query="SELECT * FROM c")
+    for name, value in (("query_parameters", "[]"), ("filter_pushdown", "true"), ("prefetch_pages", "2")):
+        with pytest.raises(CosmosConfigError, match=f"does not take option\\(s\\) {name}"):
+            readmany.read_many(Frame(), **fake_options(store), **{name: value})
+    readmany.read_many(Frame(), **fake_options(store, priority="Low", mode="FAILFAST", slow_request_ms="500"))

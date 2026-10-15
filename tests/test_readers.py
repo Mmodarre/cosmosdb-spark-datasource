@@ -130,14 +130,15 @@ def test_mode_selection_errors(make_store) -> None:
         batch_ds.streamReader(batch_ds.schema())
     custom = StructType([StructField("id", StringType()), StructField("lsn", StringType())])
     assert batch_ds.streamReader(custom) is not None  # explicit schema: LatestVersion default
-    with pytest.raises(CosmosConfigError, match="not supported for streaming"):
+    with pytest.raises(CosmosConfigError, match="does not apply to change-feed reads"):
         q = make_source(fake_options(store, change_feed_mode="LatestVersion", query="SELECT * FROM c"))
         q.streamReader(q.schema())
 
 
 def stream(store, **extra) -> StreamHarness:
     extra.setdefault("change_feed_mode", "LatestVersion")
-    return StreamHarness(fake_options(store, **extra), admission_control=extra.pop("_ac", False))
+    admission_control = extra.pop("_ac", False)
+    return StreamHarness(fake_options(store, **extra), admission_control=admission_control)
 
 
 def ids(h: StreamHarness, rows) -> list[str]:

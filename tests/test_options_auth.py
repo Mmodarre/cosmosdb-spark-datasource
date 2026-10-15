@@ -67,9 +67,15 @@ def test_options_are_case_insensitive_and_typed() -> None:
         ({"log_metrics": "maybe"}, "true or false"),
         ({"change_feed_mode": "Incremental"}, "change_feed_mode"),
         ({"start_from": "yesterday"}, "ISO-8601"),
-        ({"query_parameters": "{bad json"}, "JSON list"),
-        ({"query_parameters": '[{"name": "x", "value": 1}]'}, "starting with '@'"),
-        ({"query_parameters": '{"name": "@x"}'}, "JSON list"),
+        ({"query": "SELECT * FROM c", "query_parameters": "{bad json"}, "JSON list"),
+        ({"query": "SELECT * FROM c", "query_parameters": '[{"name": "x", "value": 1}]'}, "starting with '@'"),
+        ({"query": "SELECT * FROM c", "query_parameters": '{"name": "@x"}'}, "JSON list"),
+        ({"query_parameters": '[{"name": "@x", "value": 1}]'}, "only applies with 'query' or 'sampling_query'"),
+        ({"connection_timeout_seconds": "0"}, "greater than 0"),
+        ({"read_timeout_seconds": "-1"}, "greater than 0"),
+        ({"throttle_max_wait_seconds": "-1"}, ">= 0"),
+        ({"slow_request_log_per_minute": "5"}, "only applies with 'slow_request_ms'"),
+        ({"slow_request_ms": "0", "slow_request_log_per_minute": "5"}, "only applies with 'slow_request_ms'"),
         ({"raw_json_column": "_corrupt_record"}, "must differ"),
         ({"max_items_per_trigger": "-5"}, ">= 1"),
     ],
@@ -101,10 +107,59 @@ def test_query_parameters_parsed() -> None:
     assert o.query_explicit
 
 
-def test_unknown_options_warn(caplog: pytest.LogCaptureFixture) -> None:
-    with caplog.at_level(logging.WARNING, logger="cosmosdb_datasource"):
-        opts(account_key=KEY, partiton_key="oops")
-    assert "partiton_key" in caplog.text
+@pytest.mark.parametrize(
+    ("name", "message"),
+    [
+        ("partiton_key", r"'partiton_key' \(did you mean 'partition_key'\?\)"),
+        ("initial_snapshots", r"did you mean 'initial_snapshot'\?"),
+        ("filterPushdown", r"'filterpushdown' \(did you mean 'filter_pushdown'\?\)"),
+        ("changeFeedMode", r"did you mean 'change_feed_mode'\?"),
+        ("endAt", r"did you mean 'end_at'\?"),
+        ("colour", r"Unknown cosmosdb option\(s\): 'colour'\. "),
+    ],
+)
+def test_unknown_options_are_rejected_with_a_suggestion(name: str, message: str) -> None:
+    with pytest.raises(CosmosConfigError, match=message):
+        opts(account_key=KEY, **{name: "x"})
+
+
+def test_options_that_spark_adds_are_accepted() -> None:
+    opts(account_key=KEY, path="ignored")  # .load(path)
+    opts(account_key=KEY, paths='["a", "b"]')  # .load(path1, path2)
+
+
+def test_timeouts_take_fractions_of_a_second() -> None:
+    o = opts(
+        account_key=KEY, connection_timeout_seconds="2.5", read_timeout_seconds="0.5", throttle_max_wait_seconds="1.5"
+    )
+    assert (o.connection_timeout_seconds, o.read_timeout_seconds, o.throttle_max_wait_seconds) == (2.5, 0.5, 1.5)
+    assert opts(account_key=KEY, throttle_max_wait_seconds="0").throttle_max_wait_seconds == 0
+
+
+@pytest.mark.parametrize(
+    ("auth", "message"),
+    [
+        ({"auth_type": "key", "account_key": KEY, "client_secret": "s"}, "client_secret do not apply to auth_type=key"),
+        ({"auth_type": "default", "account_key": KEY}, "account_key do not apply to auth_type=default"),
+        ({"auth_type": "default", "client_id": "c"}, "client_id do not apply to auth_type=default"),
+        ({"account_key": KEY, "access_token_expires_on": "123"}, "access_token_expires_on do not apply"),
+        ({"auth_type": "access_token", "access_token": "t", "tenant_id": "x"}, "tenant_id do not apply"),
+        (
+            {
+                "auth_type": "service_principal",
+                "tenant_id": "t",
+                "client_id": "c",
+                "client_secret": "s",
+                "client_certificate_password": "p",
+            },
+            "only applies with 'client_certificate'",
+        ),
+        ({"auth_type": "key", "account_key": KEY, "service_credential": "cred"}, "service_credential do not apply"),
+    ],
+)
+def test_credential_options_of_another_auth_type_are_rejected(auth: dict[str, str], message: str) -> None:
+    with pytest.raises(CosmosConfigError, match=message):
+        parse_options({**BASE, **auth})
 
 
 def test_test_backend_hook_requires_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -423,3 +478,41 @@ def test_tls_options_reach_the_sdk(caplog: pytest.LogCaptureFixture) -> None:
     assert len(keys) == 3
     with pytest.raises(CosmosConfigError, match="cannot be combined"):
         opts(account_key=KEY, tls_verify="false", tls_ca_bundle="/x")
+
+
+@pytest.mark.parametrize(
+    ("extra", "stream", "unused"),
+    [
+        ({"change_feed_end_wait_seconds": "5"}, False, "change_feed_end_wait_seconds"),
+        ({"item_ids": '[["d1", "p1"]]', "partitions_per_feed_range": "4"}, False, "partitions_per_feed_range"),
+        ({"item_ids": '[["d1", "p1"]]', "prefetch_pages": "2"}, False, "prefetch_pages"),
+        ({"item_ids": '[["d1", "p1"]]', "page_size": "10"}, False, "page_size"),
+        ({"partition_key": "p1", "partitions_per_feed_range": "2"}, False, "partitions_per_feed_range"),
+        ({"change_feed_mode": "LatestVersion", "filter_pushdown": "true"}, False, "filter_pushdown"),
+        ({"change_feed_mode": "LatestVersion", "arrow_batches": "true"}, False, "arrow_batches"),
+        ({"change_feed_mode": "LatestVersion", "filter_pushdown": "auto"}, True, "filter_pushdown"),
+        ({"change_feed_mode": "LatestVersion", "prefetch_pages": "2"}, True, "prefetch_pages"),
+        ({"change_feed_mode": "LatestVersion", "max_integrated_cache_staleness_ms": "5"}, True, "max_integrated"),
+        ({"snapshot_stream": "true", "filter_pushdown": "true"}, True, "filter_pushdown"),
+        ({"snapshot_stream": "true", "arrow_batches": "false"}, True, "arrow_batches"),
+    ],
+)
+def test_options_without_effect_on_the_read_are_rejected(make_store, extra, stream, unused) -> None:
+    from tests.conftest import fake_options
+    from tests.harness import make_source
+
+    ds = make_source(fake_options(make_store(), **extra))
+    with pytest.raises(CosmosConfigError, match=f"{unused}.* have no effect"):
+        if stream:
+            ds.streamReader(ds.schema())
+        else:
+            ds.reader(ds.schema())
+
+
+def test_query_options_apply_to_an_initial_snapshot(make_store) -> None:
+    from tests.conftest import fake_options
+    from tests.harness import make_source
+
+    extra = {"prefetch_pages": "2", "max_integrated_cache_staleness_ms": "5", "initial_snapshot": "true"}
+    ds = make_source(fake_options(make_store(), change_feed_mode="LatestVersion", **extra))
+    assert type(ds.streamReader(ds.schema())).__name__ == "CosmosStreamReader"

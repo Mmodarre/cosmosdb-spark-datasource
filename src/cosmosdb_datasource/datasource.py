@@ -7,7 +7,13 @@ from pyspark.sql.types import StructType
 
 from cosmosdb_datasource._compat import filter_pushdown_planner, local_struct_type
 from cosmosdb_datasource.errors import CosmosConfigError
-from cosmosdb_datasource.options import AUTO, STREAM_ONLY_OPTIONS, STREAM_SNAPSHOT_OPTIONS, parse_options
+from cosmosdb_datasource.options import (
+    AUTO,
+    STREAM_ONLY_OPTIONS,
+    STREAM_SNAPSHOT_OPTIONS,
+    parse_options,
+    unused_options,
+)
 from cosmosdb_datasource.schema import batch_schema, change_feed_schema, snapshot_stream_schema
 
 
@@ -56,7 +62,14 @@ class CosmosDBDataSource(DataSource):
         if self._opts.stream_options_present or self._opts.batch_change_feed_options_present:
             from cosmosdb_datasource.changefeed_batch import CosmosChangeFeedBatchReader
 
+            self._reject_unused("change_feed")
             return CosmosChangeFeedBatchReader(self._opts, schema)
+        if self._opts.item_ids:
+            self._reject_unused("items")
+        elif self._opts.partition_key is not None:
+            self._reject_unused("logical_partition")
+        else:
+            self._reject_unused("documents")
         pushdown = self._opts.filter_pushdown
         # A reader with pushFilters fails planning while spark.sql.python.filterPushdown.enabled is false
         # (DATA_SOURCE_PUSHDOWN_DISABLED), so "auto" returns it only to Spark's pushdown planner, which
@@ -83,6 +96,7 @@ class CosmosDBDataSource(DataSource):
         if self._opts.snapshot_stream:
             from cosmosdb_datasource.snapshot_stream import CosmosSnapshotStreamReader
 
+            self._reject_unused("snapshot_stream")
             return CosmosSnapshotStreamReader(self._opts, schema)
         if not self._opts.stream_options_present and schema == batch_schema(self._opts.raw_json_column):
             raise CosmosConfigError(
@@ -93,7 +107,13 @@ class CosmosDBDataSource(DataSource):
             )
         from cosmosdb_datasource.stream import CosmosStreamReader
 
+        self._reject_unused("change_feed")
         return CosmosStreamReader(self._opts, schema)
+
+    def _reject_unused(self, read: str) -> None:
+        error = unused_options(self._opts, read)
+        if error is not None:
+            raise error
 
     def __repr__(self) -> str:
         return f"CosmosDBDataSource({self._opts!r})"

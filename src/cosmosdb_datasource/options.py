@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import difflib
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -100,70 +102,118 @@ SECRET_OPTIONS = ("account_key", "client_secret", "access_token", "client_certif
 TEST_BACKEND_OPTION = "_test_backend"
 TEST_HOOKS_ENV = "COSMOSDB_DATASOURCE_TEST_HOOKS"
 
-KNOWN_OPTIONS = frozenset(
-    {
-        "endpoint",
-        "database",
-        "container",
-        "auth_type",
-        "account_key",
-        "tenant_id",
-        "client_id",
-        "client_secret",
-        "client_certificate",
-        "client_certificate_password",
-        "access_token",
-        "access_token_expires_on",
-        "service_credential",
-        "preferred_regions",
-        "consistency_level",
-        "connection_timeout_seconds",
-        "read_timeout_seconds",
-        "tls_verify",
-        "tls_ca_bundle",
-        "throttle_max_retries",
-        "throttle_max_wait_seconds",
-        "max_retries",
-        "retry_max_backoff_seconds",
-        "priority",
-        "query",
-        "query_parameters",
-        "page_size",
-        "partitions_per_feed_range",
-        "mode",
-        "raw_json_column",
-        "corrupt_record_column",
-        "log_metrics",
-        "change_feed_mode",
-        "start_from",
-        "max_items_per_trigger",
-        "change_feed_end_wait_seconds",
-        "initial_snapshot",
-        "initial_snapshot_delay_seconds",
-        "snapshot_stream",
-        "snapshot_interval_seconds",
-        "filter_pushdown",
-        "prefetch_pages",
-        "arrow_batches",
-        "partition_key",
-        "item_ids",
-        "throughput_bucket",
-        "target_ru_per_second",
-        "end_at",
-        "batch_checkpoint_location",
-        "max_integrated_cache_staleness_ms",
-        "slow_request_ms",
-        "slow_request_log_per_minute",
-        "infer_schema",
-        "sampling_size",
-        "sampling_query",
-        "infer_system_properties",
-        "infer_timestamp",
-        TEST_BACKEND_OPTION,
-        # Spark may add "path" when .load(path) is used; we ignore it.
-        "path",
-    }
+AUTH_OPTIONS = (
+    "auth_type",
+    "account_key",
+    "tenant_id",
+    "client_id",
+    "client_secret",
+    "client_certificate",
+    "client_certificate_password",
+    "access_token",
+    "access_token_expires_on",
+    "service_credential",
 )
+# The options of the client and its requests, which apply to every read (read_many included).
+CONNECTION_OPTIONS = (
+    "endpoint",
+    "database",
+    "container",
+    *AUTH_OPTIONS,
+    "preferred_regions",
+    "consistency_level",
+    "connection_timeout_seconds",
+    "read_timeout_seconds",
+    "tls_verify",
+    "tls_ca_bundle",
+    "throttle_max_retries",
+    "throttle_max_wait_seconds",
+    "max_retries",
+    "retry_max_backoff_seconds",
+    "priority",
+    "throughput_bucket",
+    "slow_request_ms",
+    "slow_request_log_per_minute",
+)
+CONVERSION_OPTIONS = ("mode", "raw_json_column", "corrupt_record_column")
+READ_OPTIONS = (
+    "query",
+    "query_parameters",
+    "page_size",
+    "partitions_per_feed_range",
+    "log_metrics",
+    "change_feed_mode",
+    "start_from",
+    "max_items_per_trigger",
+    "change_feed_end_wait_seconds",
+    "initial_snapshot",
+    "initial_snapshot_delay_seconds",
+    "snapshot_stream",
+    "snapshot_interval_seconds",
+    "filter_pushdown",
+    "prefetch_pages",
+    "arrow_batches",
+    "partition_key",
+    "item_ids",
+    "target_ru_per_second",
+    "end_at",
+    "batch_checkpoint_location",
+    "max_integrated_cache_staleness_ms",
+    "infer_schema",
+    "sampling_size",
+    "sampling_query",
+    "infer_system_properties",
+    "infer_timestamp",
+)
+# Spark adds "path" for .load(path) and "paths" for .load(path1, path2); the data source ignores them.
+SPARK_PATH_OPTIONS = ("path", "paths")
+PUBLIC_OPTIONS = frozenset({*CONNECTION_OPTIONS, *CONVERSION_OPTIONS, *READ_OPTIONS})
+KNOWN_OPTIONS = frozenset({*PUBLIC_OPTIONS, *SPARK_PATH_OPTIONS, TEST_BACKEND_OPTION})
+
+# Options that a kind of read accepts but does not use (see unused_options).
+_QUERY_PAGE_OPTIONS = ("prefetch_pages", "max_integrated_cache_staleness_ms")
+_UNUSED_BY = {
+    "documents": ("change_feed_end_wait_seconds",),
+    "logical_partition": ("change_feed_end_wait_seconds", "partitions_per_feed_range"),
+    "items": (
+        "change_feed_end_wait_seconds",
+        "partitions_per_feed_range",
+        "page_size",
+        "filter_pushdown",
+        *_QUERY_PAGE_OPTIONS,
+    ),
+    "change_feed": ("filter_pushdown", "arrow_batches"),
+    "snapshot_stream": ("filter_pushdown", "arrow_batches"),
+}
+_WHY_UNUSED = {
+    "documents": "only change-feed reads wait for a lagging replica",
+    "logical_partition": "a logical partition is read as one task",
+    "items": "item_ids are read with point reads, not with a query",
+    "change_feed": "change-feed reads run no query (except an initial snapshot), and get no filters or Arrow batches",
+    "snapshot_stream": "streams get no filters from Spark and no Arrow batches",
+}
+
+
+def _suggestion(name: str) -> str | None:
+    def plain(text: str) -> str:
+        return text.replace("_", "").replace("-", "")
+
+    same = [known for known in sorted(PUBLIC_OPTIONS) if plain(known) == plain(name)]
+    if same:
+        return same[0]
+    close = difflib.get_close_matches(name, sorted(PUBLIC_OPTIONS), n=1, cutoff=0.75)
+    return close[0] if close else None
+
+
+def _unknown(names: list[str]) -> CosmosConfigError:
+    described = []
+    for name in names:
+        suggestion = _suggestion(name)
+        described.append(f"{name!r} (did you mean {suggestion!r}?)" if suggestion else repr(name))
+    return CosmosConfigError(
+        f"Unknown cosmosdb option(s): {', '.join(described)}. Option names are case-insensitive; the README lists them."
+    )
+
 
 _ENDPOINT_HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+$")
 
@@ -321,12 +371,12 @@ class CosmosOptions:
     auth: AuthOptions
     preferred_regions: tuple[str, ...] = ()
     consistency_level: str | None = None
-    connection_timeout_seconds: int | None = None
-    read_timeout_seconds: int | None = None
+    connection_timeout_seconds: float | None = None
+    read_timeout_seconds: float | None = None
     tls_verify: bool = True
     tls_ca_bundle: str | None = None
     throttle_max_retries: int = 9
-    throttle_max_wait_seconds: int = 60
+    throttle_max_wait_seconds: float = 60.0
     max_retries: int = 8
     retry_max_backoff_seconds: float = 60.0
     priority: str | None = None
@@ -368,6 +418,7 @@ class CosmosOptions:
     batch_checkpoint_location: str | None = None
     query_explicit: bool = False
     test_backend: str | None = None
+    given: frozenset[str] = frozenset()  # the options set explicitly (lower case)
 
     @property
     def start_from_datetime(self) -> datetime | None:
@@ -432,6 +483,20 @@ SERVICE_CREDENTIAL_UNSUPPORTED = (
 )
 
 
+_AUTH_TYPE_OPTIONS = {
+    AUTH_KEY: ("account_key",),
+    AUTH_SERVICE_PRINCIPAL: (
+        "tenant_id",
+        "client_id",
+        "client_secret",
+        "client_certificate",
+        "client_certificate_password",
+    ),
+    AUTH_ACCESS_TOKEN: ("access_token", "access_token_expires_on"),
+    AUTH_DEFAULT: (),
+}
+
+
 def _parse_auth(opts: dict[str, str]) -> AuthOptions:
     raw_type = _get(opts, "auth_type")
     auth_type = raw_type.lower() if raw_type else _infer_auth_type(opts)
@@ -459,6 +524,11 @@ def _parse_auth(opts: dict[str, str]) -> AuthOptions:
     missing = [name for name in required if not _get(opts, name)]
     if missing:
         raise CosmosConfigError(f"auth_type={auth_type} requires option(s): {', '.join(missing)}.")
+    extra = [n for n in AUTH_OPTIONS if n != "auth_type" and n not in _AUTH_TYPE_OPTIONS[auth_type] and _get(opts, n)]
+    if extra:
+        raise CosmosConfigError(f"Option(s) {', '.join(extra)} do not apply to auth_type={auth_type}.")
+    if auth.client_certificate_password and not auth.client_certificate:
+        raise CosmosConfigError("Option 'client_certificate_password' only applies with 'client_certificate'.")
     if auth_type == AUTH_SERVICE_PRINCIPAL and bool(auth.client_secret) == bool(auth.client_certificate):
         raise CosmosConfigError(
             "auth_type=service_principal requires exactly one of the options client_secret and client_certificate."
@@ -601,6 +671,15 @@ def _prefetch_pages(opts: dict[str, str]) -> int:
     return value
 
 
+def _timeout(opts: dict[str, str], name: str) -> float | None:
+    if _get(opts, name) is None:
+        return None
+    value = _float(opts, name, 0.0, minimum=-math.inf)
+    if value <= 0:
+        raise CosmosConfigError(f"Option '{name}' must be greater than 0, got {value}.")
+    return value
+
+
 def _parse_tristate(opts: dict[str, str], name: str, default: str) -> str:
     raw = _get(opts, name)
     if raw is None:
@@ -634,7 +713,8 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
 
     unknown = sorted(k for k in opts if k not in KNOWN_OPTIONS)
     if unknown:
-        logger.warning("Ignoring unknown cosmosdb option(s): %s", ", ".join(unknown))
+        raise _unknown(unknown)
+    given = frozenset(k for k in opts if _get(opts, k) is not None)
 
     endpoint = _get(opts, "endpoint")
     database = _get(opts, "database")
@@ -728,19 +808,23 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
     partition_key = _parse_partition_key(_get(opts, "partition_key"))
     item_ids = _parse_item_ids(_get(opts, "item_ids"))
     if partition_key is not None or item_ids:
-        given = [n for n in ("partition_key", "item_ids") if _get(opts, n) is not None]
+        scoped = [n for n in ("partition_key", "item_ids") if _get(opts, n) is not None]
         streaming = [
             *(n for n in (*STREAM_ONLY_OPTIONS, *CHANGE_FEED_BATCH_OPTIONS) if _get(opts, n) is not None),
             *(["snapshot_stream"] if snapshot_stream else []),
         ]
-        if len(given) > 1:
+        if len(scoped) > 1:
             raise CosmosConfigError("Options 'partition_key' and 'item_ids' cannot be combined.")
         if streaming:
-            raise CosmosConfigError(f"Option '{given[0]}' applies to batch reads, not with {', '.join(streaming)}.")
+            raise CosmosConfigError(f"Option '{scoped[0]}' applies to batch reads, not with {', '.join(streaming)}.")
         if item_ids and _get(opts, "query") is not None:
             raise CosmosConfigError("Option 'item_ids' reads documents by id; remove 'query'.")
 
     query = _get(opts, "query")
+    if "query_parameters" in given and query is None and _get(opts, "sampling_query") is None:
+        raise CosmosConfigError("Option 'query_parameters' only applies with 'query' or 'sampling_query'.")
+    if "slow_request_log_per_minute" in given and not _float(opts, "slow_request_ms", 0.0, minimum=0.0):
+        raise CosmosConfigError("Option 'slow_request_log_per_minute' only applies with 'slow_request_ms' above 0.")
     raw_column = _get(opts, "raw_json_column", DEFAULT_RAW_COLUMN) or DEFAULT_RAW_COLUMN
     corrupt_column = _get(opts, "corrupt_record_column", DEFAULT_CORRUPT_COLUMN) or DEFAULT_CORRUPT_COLUMN
     if raw_column == corrupt_column:
@@ -767,12 +851,12 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
         auth=_parse_auth(opts),
         preferred_regions=regions,
         consistency_level=consistency,
-        connection_timeout_seconds=_int(opts, "connection_timeout_seconds", None, minimum=1),
-        read_timeout_seconds=_int(opts, "read_timeout_seconds", None, minimum=1),
+        connection_timeout_seconds=_timeout(opts, "connection_timeout_seconds"),
+        read_timeout_seconds=_timeout(opts, "read_timeout_seconds"),
         tls_verify=tls_verify,
         tls_ca_bundle=tls_ca_bundle,
         throttle_max_retries=_int(opts, "throttle_max_retries", 9, minimum=0),  # type: ignore[arg-type]
-        throttle_max_wait_seconds=_int(opts, "throttle_max_wait_seconds", 60, minimum=0),  # type: ignore[arg-type]
+        throttle_max_wait_seconds=_float(opts, "throttle_max_wait_seconds", 60.0, minimum=0.0),
         max_retries=_int(opts, "max_retries", 8, minimum=0),  # type: ignore[arg-type]
         retry_max_backoff_seconds=_float(opts, "retry_max_backoff_seconds", 60.0, minimum=0.1),
         priority=priority,
@@ -816,9 +900,20 @@ def parse_options(options: Mapping[str, Any] | None) -> CosmosOptions:
         slow_request_log_per_minute=_int(opts, "slow_request_log_per_minute", 10, minimum=1),  # type: ignore[arg-type]
         query_explicit=query is not None,
         test_backend=test_backend,
+        given=given,
     )
 
 
 def redacted_options(options: Mapping[str, Any] | None) -> dict[str, str]:
     """Return a copy of the raw options that is safe to log."""
     return {k: (REDACTED if k in SECRET_OPTIONS else v) for k, v in _normalize(options).items()}
+
+
+def unused_options(opts: CosmosOptions, read: str) -> CosmosConfigError | None:
+    """Return the error for options that ``read`` (a key of ``_UNUSED_BY``) would accept without using them."""
+    unused = [n for n in _UNUSED_BY[read] if n in opts.given]
+    if read == "change_feed" and not opts.initial_snapshot:
+        unused += [n for n in _QUERY_PAGE_OPTIONS if n in opts.given]  # only the initial snapshot runs queries
+    if not unused:
+        return None
+    return CosmosConfigError(f"Option(s) {', '.join(unused)} have no effect here: {_WHY_UNUSED[read]}.")

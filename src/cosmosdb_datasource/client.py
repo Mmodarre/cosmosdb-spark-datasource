@@ -82,7 +82,8 @@ def _connection_policy(opts: CosmosOptions) -> Any:
 
     policy = ConnectionPolicy()
     policy.RetryOptions = RetryOptions(
-        max_retry_attempt_count=opts.throttle_max_retries, max_wait_time_in_seconds=opts.throttle_max_wait_seconds
+        max_retry_attempt_count=opts.throttle_max_retries,
+        max_wait_time_in_seconds=opts.throttle_max_wait_seconds,  # type: ignore[arg-type]  # used as seconds * 1000
     )
     if opts.tls_ca_bundle:
         # Passed to the transport as connection_verify=<path> (azure-cosmos _synchronized_request).
