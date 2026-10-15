@@ -224,3 +224,19 @@ def test_properties_that_differ_only_in_case(spark) -> None:
     ]
     declared = spark.read.format("cosmosdb").schema("id STRING, name STRING").options(**fake_options(store)).load()
     assert sorted(tuple(r) for r in declared.collect()) == [("1", "x"), ("2", "y"), ("3", "exact")]
+
+
+def test_read_many(spark) -> None:
+    from cosmosdb_datasource import read_many
+
+    store = _store("spark_read_many", partitions=3, docs=60)
+    wanted = spark.createDataFrame(
+        [("d1", "p1"), ("d2", "p2"), ("d2", "p2"), ("missing", "p0"), (None, "p1")], "id string, key string"
+    )
+    options = {k: v for k, v in fake_options(store).items() if k != "container"}
+    rows = read_many(wanted, pk_column="key", container=store.name, **options).collect()
+    assert sorted(r.id for r in rows) == ["d1", "d2", "d2"]  # repeated identities: once per Arrow batch
+    assert {r.pk for r in rows} == {"p1", "p2"} and rows[0].body.startswith("{")
+    typed = read_many(wanted, pk_column="key", schema="id STRING, v BIGINT", container=store.name, **options)
+    assert typed.schema.simpleString() == "struct<id:string,v:bigint>"
+    assert sorted(tuple(r) for r in typed.distinct().collect()) == [("d1", 1), ("d2", 2)]

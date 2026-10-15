@@ -4,7 +4,8 @@ Releases are made by pushing a tag `v<version>` on `main`. The
 [release workflow](.github/workflows/release.yml) then:
 
 1. checks that the tag equals the version in `pyproject.toml` and that the tagged commit is on
-   `main`;
+   `main`, and that `CI passed` succeeded on that commit (it waits up to 45 minutes for a CI run
+   that is still in progress, and publishes nothing otherwise);
 2. builds the sdist and wheel, runs `twine check --strict` and
    [`check_dist.py`](.github/scripts/check_dist.py) (package-only wheel, metadata without e-mail
    addresses, version equal to the tag and to `pyproject.toml`);
@@ -38,7 +39,7 @@ reads it from the installed distribution's metadata.
    uv version X.Y.Z          # updates pyproject.toml and uv.lock
    ```
 3. Open a pull request, and merge it once CI is green.
-4. Tag the merge commit on `main` and push the tag:
+4. Once CI has passed on the merge commit on `main`, tag it and push the tag:
 
    ```bash
    git switch main && git pull

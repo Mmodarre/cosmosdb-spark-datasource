@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Keep within the uv_build bound of pyproject.toml's [build-system], like ci.yml.
   UV_VERSION: "0.13.1"
   TWINE_VERSION: "7.0.0"
   FORCE_COLOR: "1"
@@ -20,7 +21,10 @@ jobs:
   build:
     name: Build and check
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      checks: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
@@ -53,6 +57,28 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "Releasing $version (pre-release: $prerelease)"
+      # The push of main runs CI on the commit a release is tagged from; wait for it if it is still running.
+      - name: Require CI to have passed on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          deadline=$((SECONDS + 45 * 60))
+          while true; do
+            runs="$(gh api "repos/$GH_REPO/commits/$GITHUB_SHA/check-runs?check_name=CI%20passed&per_page=100" \
+              --jq '[.check_runs[] | "\(.status)/\(.conclusion)"] | join(" ")')"
+            echo "CI passed on ${GITHUB_SHA:0:7}: ${runs:-no run yet}"
+            case " $runs " in
+              *" completed/success "*) exit 0 ;;
+              *" queued/"* | *" in_progress/"* | "  ") ;;
+              *) echo "::error::CI did not pass on the tagged commit ${GITHUB_SHA:0:7}; nothing is published."; exit 1 ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::CI has not passed on the tagged commit ${GITHUB_SHA:0:7} within 45 minutes."
+              exit 1
+            fi
+            sleep 30
+          done
       - name: Build the sdist and wheel
         run: uv build
       - name: twine check
