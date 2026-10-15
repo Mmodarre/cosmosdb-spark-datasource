@@ -4,7 +4,10 @@
 cache), and Spark reuses Python workers across tasks, so one client per (endpoint, principal,
 client settings) is kept per process and closed at interpreter exit. Token-based clients are keyed
 by principal identity, never by token value: a fresh token shipped with a later partition is
-pushed into the cached credential instead of creating a new client.
+pushed into the cached credential instead of creating a new client. A service principal's key also
+holds a hash of its secret or certificate, so a rotated secret gets a new client whose credential
+can refresh tokens. A stream reader holds a reference to its client and releases it when it stops;
+the client is closed when no stream reader of the process holds it any more.
 """
 
 from __future__ import annotations
@@ -38,23 +41,27 @@ class _Entry:
 _LOCK = threading.Lock()
 _CLIENTS: dict[tuple[Any, ...], _Entry] = {}
 _BACKENDS: dict[tuple[Any, ...], Any] = {}
+_HOLDERS: dict[tuple[Any, ...], int] = {}  # client key -> stream readers that hold the client
+
+
+def _digest(secret: str) -> str:
+    return hashlib.sha256(secret.encode()).hexdigest()
 
 
 def _client_key(opts: CosmosOptions) -> tuple[Any, ...]:
     auth = opts.auth
     if auth.auth_type == AUTH_KEY:
         assert auth.account_key is not None
-        principal: tuple[str, ...] = (
-            opts.endpoint,
-            AUTH_KEY,
-            hashlib.sha256(auth.account_key.encode()).hexdigest(),
-        )
+        principal: tuple[str, ...] = (opts.endpoint, AUTH_KEY, _digest(auth.account_key))
     elif auth.auth_type == AUTH_ACCESS_TOKEN:
         # Pre-minted tokens may belong to different principals: never share a client across them.
         assert auth.access_token is not None
-        principal = (*identity_key(auth, opts.endpoint), hashlib.sha256(auth.access_token.encode()).hexdigest())
+        principal = (*identity_key(auth, opts.endpoint), _digest(auth.access_token))
     else:
         principal = identity_key(auth, opts.endpoint)
+        secret = auth.client_secret or auth.client_certificate
+        if secret:  # the client's credential builds its fallback from the secret it was created with
+            principal = (*principal, _digest(secret))
     settings = (
         opts.preferred_regions,
         opts.consistency_level,
@@ -70,12 +77,13 @@ def _client_key(opts: CosmosOptions) -> tuple[Any, ...]:
 
 
 def _connection_policy(opts: CosmosOptions) -> Any:
-    """Return a connection policy with the throttle retry settings of ``opts``.
+    """Return a connection policy with the timeouts and throttle retry settings of ``opts``.
 
-    The ``retry_throttle_total`` and ``retry_throttle_backoff_max`` keywords cannot express 0:
-    ``cosmos_client._build_connection_policy`` keeps ``value or default`` (azure-cosmos 4.14.0 to
-    4.17.1), so 0 meant 9 retries. A policy passed as ``connection_policy`` keeps its
-    ``RetryOptions``, whose class the public ``ConnectionPolicy.RetryOptions`` setter takes.
+    The settings are set on the policy rather than passed as keywords. The ``retry_throttle_total``
+    and ``retry_throttle_backoff_max`` keywords cannot express 0: ``cosmos_client._build_connection_policy``
+    keeps ``value or default``, so 0 would mean 9 retries. Before azure-cosmos 4.16 the ``read_timeout``
+    keyword is not read at all. A policy passed as ``connection_policy`` keeps its ``RetryOptions``,
+    whose class the public ``ConnectionPolicy.RetryOptions`` setter takes, and its timeouts.
     """
     from azure.cosmos._retry_options import RetryOptions
     from azure.cosmos.documents import ConnectionPolicy, SSLConfiguration
@@ -85,6 +93,11 @@ def _connection_policy(opts: CosmosOptions) -> Any:
         max_retry_attempt_count=opts.throttle_max_retries,
         max_wait_time_in_seconds=opts.throttle_max_wait_seconds,  # type: ignore[arg-type]  # used as seconds * 1000
     )
+    # Seconds, passed to the transport's timeouts, which take fractions (the SDK annotates them as int).
+    if opts.connection_timeout_seconds:
+        policy.RequestTimeout = opts.connection_timeout_seconds  # type: ignore[assignment]
+    if opts.read_timeout_seconds:
+        policy.ReadTimeout = opts.read_timeout_seconds
     if opts.tls_ca_bundle:
         # Passed to the transport as connection_verify=<path> (azure-cosmos _synchronized_request).
         ssl = SSLConfiguration()
@@ -105,10 +118,6 @@ def _client_kwargs(opts: CosmosOptions) -> dict[str, Any]:
         kwargs["preferred_locations"] = list(opts.preferred_regions)
     if opts.consistency_level:
         kwargs["consistency_level"] = opts.consistency_level
-    if opts.connection_timeout_seconds:
-        kwargs["connection_timeout"] = opts.connection_timeout_seconds
-    if opts.read_timeout_seconds:
-        kwargs["read_timeout"] = opts.read_timeout_seconds
     if opts.throughput_bucket:
         kwargs["throughput_bucket"] = opts.throughput_bucket  # x-ms-cosmos-throughput-bucket on every request
     return kwargs
@@ -180,6 +189,40 @@ def get_backend(opts: CosmosOptions, token: SecretToken | None = None) -> Any:
     return backend
 
 
+def hold(opts: CosmosOptions) -> tuple[Any, ...] | None:
+    """Record that a stream reader uses the client of ``opts``; return the key to :func:`release` it with."""
+    if opts.test_backend:
+        return None
+    key = _client_key(opts)
+    with _LOCK:
+        _HOLDERS[key] = _HOLDERS.get(key, 0) + 1
+    return key
+
+
+def release(key: tuple[Any, ...] | None) -> None:
+    """Release a :func:`hold`; close the client once no stream reader of this process holds it."""
+    if key is None:
+        return
+    with _LOCK:
+        holders = _HOLDERS.get(key, 0) - 1
+        if holders > 0:
+            _HOLDERS[key] = holders
+            return
+        _HOLDERS.pop(key, None)
+        entry = _CLIENTS.pop(key, None)
+        for backend_key in [k for k in _BACKENDS if k[: len(key)] == key]:
+            del _BACKENDS[backend_key]
+    if entry is not None:
+        _close_quietly(entry.client)
+
+
+def _close_quietly(cosmos_client: Any) -> None:
+    try:
+        _close_client(cosmos_client)
+    except Exception as exc:  # noqa: BLE001 - best effort
+        logger.debug("Ignoring error while closing a Cosmos client: %s", type(exc).__name__)
+
+
 def _close_client(cosmos_client: Any) -> None:
     # CosmosClient.close() only exists in newer azure-cosmos releases (absent in 4.14.0);
     # the context-manager exit is available in every supported version.
@@ -191,16 +234,14 @@ def _close_client(cosmos_client: Any) -> None:
 
 
 def close_all() -> None:
-    """Close every cached client (registered with atexit; also used by stream ``stop()``)."""
+    """Close every cached client (registered with atexit)."""
     with _LOCK:
         entries = list(_CLIENTS.values())
         _CLIENTS.clear()
         _BACKENDS.clear()
+        _HOLDERS.clear()
     for entry in entries:
-        try:
-            _close_client(entry.client)
-        except Exception as exc:  # noqa: BLE001 - best effort at shutdown
-            logger.debug("Ignoring error while closing a Cosmos client: %s", type(exc).__name__)
+        _close_quietly(entry.client)
 
 
 atexit.register(close_all)

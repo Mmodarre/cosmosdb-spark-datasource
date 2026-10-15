@@ -24,7 +24,7 @@ from cosmosdb_datasource.arrow import record_batches
 from cosmosdb_datasource.auth import SecretToken
 from cosmosdb_datasource.dedup import SeenKeys, fingerprint
 from cosmosdb_datasource.documents import PartitionKeyInfo
-from cosmosdb_datasource.errors import CosmosDataSourceError
+from cosmosdb_datasource.errors import CosmosConfigError, CosmosDataSourceError
 from cosmosdb_datasource.options import AUTO, CosmosOptions
 from cosmosdb_datasource.schema import RecordView
 
@@ -216,6 +216,13 @@ def query_documents(
 class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
     def __init__(self, opts: CosmosOptions, schema: StructType) -> None:
         super().__init__(opts, schema, stream=False)
+        if opts.arrow_batches == "true" and _compat.arrow_batches_supported() is False:
+            runtime = ".".join(map(str, _compat.databricks_runtime() or ()))
+            raise CosmosConfigError(
+                f"arrow_batches=true does not work on Databricks Runtime {runtime}: its read worker takes each "
+                "Arrow record batch for one row. It needs Databricks Runtime 16.4 LTS or later, or PySpark 4.0 "
+                "or later; use arrow_batches=auto or false here."
+            )
         if _CROSS_PARTITION_CLAUSES.search(opts.query):
             logger.warning(
                 "The cosmosdb query is executed independently for every feed range; ORDER BY, GROUP BY, "
@@ -281,10 +288,8 @@ class CosmosBatchReader(CosmosReaderBase, DataSourceReader):
         return rows
 
     def _arrow_batches(self) -> bool:
-        # Off by default where the Databricks engine runs the reader: its read worker's Arrow schema for
-        # the output schema has not been verified against the one built here.
         setting = self._opts.arrow_batches
-        return setting == "true" or (setting == AUTO and not _compat.engine_loaded())
+        return setting == "true" or (setting == AUTO and _compat.arrow_batches_by_default())
 
     def _read_rows(self, partition: InputPartition | None) -> Iterator[tuple[Any, ...]]:
         from cosmosdb_datasource.point_reads import CosmosItemsPartition, CosmosLogicalPartition, KeyRouted

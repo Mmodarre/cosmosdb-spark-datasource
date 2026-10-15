@@ -235,6 +235,54 @@ def test_batch_reads_yield_record_batches_unless_disabled(make_store, monkeypatc
     assert sorted(r[0] for r in rows) == sorted(f"d{i}" for i in range(30))
 
 
+@pytest.mark.parametrize(
+    ("pyspark_version", "runtime", "engine", "auto", "true_allowed"),
+    [
+        ("4.0.0", None, False, True, True),
+        ("4.2.0", "17.3", False, True, True),
+        ("3.5.2", "16.4", False, True, True),  # DBR 16.4 LTS accepts record batches
+        ("3.5.0", "15.4", False, False, False),  # DBR 15.4 LTS takes each batch for one row
+        ("3.5.0", "unparseable", False, False, True),
+        ("3.5.0", None, False, False, True),
+        ("4.0.0", None, True, False, True),  # serverless: the engine's layout is not verified
+    ],
+)
+def test_arrow_batches_by_runtime(
+    make_store, monkeypatch: pytest.MonkeyPatch, pyspark_version, runtime, engine, auto, true_allowed
+) -> None:
+    import pyspark
+
+    store = make_store()
+    store.upsert({"id": "d1", "pk": "p"})
+    monkeypatch.setattr(pyspark, "__version__", pyspark_version)
+    if runtime is None:
+        monkeypatch.delenv("DATABRICKS_RUNTIME_VERSION", raising=False)
+    else:
+        monkeypatch.setenv("DATABRICKS_RUNTIME_VERSION", runtime)
+    if engine:
+        monkeypatch.setitem(sys.modules, "_engine_pyspark", types.ModuleType("_engine_pyspark"))
+    ds = make_source(fake_options(store))
+    assert ds.reader(ds.schema())._arrow_batches() is auto
+    explicit = make_source(fake_options(store, arrow_batches="true"))
+    if true_allowed:
+        assert explicit.reader(explicit.schema())._arrow_batches()
+    else:
+        with pytest.raises(CosmosConfigError, match=r"Databricks Runtime 15\.4"):
+            explicit.reader(explicit.schema())
+
+
+def test_a_page_arrow_cannot_take_needs_pysparks_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pyspark.sql.worker import plan_data_source_read
+
+    from cosmosdb_datasource.errors import CosmosDataSourceError
+
+    monkeypatch.delattr(plan_data_source_read, "records_to_arrow_batches")
+    bad = [("1", "not a number")]
+    schema = StructType([StructField("id", StringType()), StructField("n", LongType())])
+    with pytest.raises(CosmosDataSourceError, match="arrow_batches=false"):
+        list(arrow.record_batches(iter(bad), schema, 10))
+
+
 def test_options(make_store) -> None:
     store = make_store()
     opts = make_source(fake_options(store))._opts

@@ -43,7 +43,7 @@ from typing import Any, TypeVar
 from pyspark.sql.datasource import DataSourceStreamReader, InputPartition
 from pyspark.sql.types import StructType
 
-from cosmosdb_datasource import _compat, client, epk, retry
+from cosmosdb_datasource import _compat, epk, retry
 from cosmosdb_datasource._base import (
     AVAILABLE_NOW_WRAPPER_UNSUPPORTED,
     CosmosReaderBase,
@@ -166,6 +166,8 @@ def _view(rec: ChangeRecord, feed_range: str) -> RecordView:
 
 
 class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNowBase):
+    _holds_client = True
+
     def __init__(self, opts: CosmosOptions, schema: StructType) -> None:
         super().__init__(opts, schema, stream=True)
         if opts.query_explicit:
@@ -559,4 +561,4 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
             self._known = Offset.from_dict(end)
 
     def stop(self) -> None:
-        client.close_all()
+        self._release_client()

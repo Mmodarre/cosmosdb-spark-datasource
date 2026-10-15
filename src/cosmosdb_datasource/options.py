@@ -512,7 +512,7 @@ def _parse_auth(opts: dict[str, str]) -> AuthOptions:
         account_key=_get(opts, "account_key"),
         client_secret=_get(opts, "client_secret"),
         access_token=_get(opts, "access_token"),
-        client_certificate=_get(opts, "client_certificate"),
+        client_certificate=_certificate(_get(opts, "client_certificate")),
         client_certificate_password=_get(opts, "client_certificate_password"),
     )
     required = {
@@ -539,9 +539,14 @@ def _parse_auth(opts: dict[str, str]) -> AuthOptions:
         except (ValueError, binascii.Error):
             raise CosmosConfigError(
                 "Option 'client_certificate' must be the base64 encoding of a PEM or PKCS#12 certificate with its "
-                "private key."
+                "private key (line breaks are ignored)."
             ) from None
     return auth
+
+
+def _certificate(raw: str | None) -> str | None:
+    """Return the base64 text without whitespace: ``base64`` and ``openssl base64`` wrap their output."""
+    return "".join(raw.split()) if raw is not None else None
 
 
 def _parse_query_parameters(raw: str | None) -> tuple[tuple[str, Any], ...]:
