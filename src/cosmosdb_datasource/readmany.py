@@ -13,7 +13,7 @@ from cosmosdb_datasource.arrow import record_batches
 from cosmosdb_datasource.auth import mint_driver_token
 from cosmosdb_datasource.documents import PartitionKeyInfo
 from cosmosdb_datasource.errors import CosmosConfigError
-from cosmosdb_datasource.options import CHANGE_FEED_BATCH_OPTIONS, STREAM_ONLY_OPTIONS, parse_options
+from cosmosdb_datasource.options import READ_OPTIONS, parse_options
 from cosmosdb_datasource.point_reads import ITEMS_PER_REQUEST
 from cosmosdb_datasource.schema import RecordView, RowBuilder, batch_schema, validate_schema
 
@@ -28,24 +28,18 @@ def read_many(
 ) -> DataFrame:
     """Return the documents whose ``(id, partition key)`` are rows of ``identities``, read by point reads.
 
-    ``options`` are the data source's connection and conversion options. The partition key column holds
+    ``options`` are the data source's connection and conversion options; options that choose what to read
+    (such as ``query`` or ``page_size``) are rejected. The partition key column holds
     the key in its JSON type (a string, number or boolean; an array for hierarchical keys). Rows of
     documents that do not exist are left out. The result has the batch-read schema, or ``schema``.
     """
-    opts = parse_options(options)
-    unsupported = (
-        *STREAM_ONLY_OPTIONS,
-        *CHANGE_FEED_BATCH_OPTIONS,
-        "snapshot_stream",
-        "partition_key",
-        "item_ids",
-        "query",
-        "target_ru_per_second",
-    )
-    given = {str(k).strip().lower() for k in options}
-    stray = [n for n in unsupported if n in given]
+    given = {str(k).strip().lower() for k, v in options.items() if v is not None}
+    stray = sorted(given & set(READ_OPTIONS))
     if stray:
-        raise CosmosConfigError(f"read_many does not take option(s) {', '.join(stray)}.")
+        raise CosmosConfigError(
+            f"read_many does not take option(s) {', '.join(stray)}: it takes the connection and conversion options."
+        )
+    opts = parse_options(options)
     if schema is None:
         out_schema = batch_schema(opts.raw_json_column)
     elif isinstance(schema, str):

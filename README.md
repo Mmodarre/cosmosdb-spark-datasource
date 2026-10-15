@@ -194,7 +194,22 @@ own session.
 
 ## Options
 
-Option names are case-insensitive. Unknown options are logged as a warning and ignored.
+Option names are case-insensitive. An unknown option fails the read with `CosmosConfigError`,
+which names the closest known option (`initial_snapshots` gives "did you mean
+'initial_snapshot'?"); `path` and `paths`, which Spark adds for `.load(path)`, are ignored. So
+does an option that the read would accept without using it:
+
+- `query_parameters` without `query` or `sampling_query`; `slow_request_log_per_minute` without
+  `slow_request_ms`;
+- credential options of another `auth_type` (for example `client_secret` with `auth_type=key`),
+  and `client_certificate_password` without `client_certificate`;
+- `change_feed_end_wait_seconds` on reads of documents;
+- with `item_ids`: `partitions_per_feed_range`, `page_size`, `prefetch_pages`,
+  `max_integrated_cache_staleness_ms` and `filter_pushdown`; with `partition_key`:
+  `partitions_per_feed_range`;
+- on change-feed reads (streams and batch reads): `filter_pushdown` and `arrow_batches`, and,
+  without `initial_snapshot`, `prefetch_pages` and `max_integrated_cache_staleness_ms`; on
+  snapshot streams: `filter_pushdown` and `arrow_batches`.
 
 ### Connection and authentication
 
@@ -213,8 +228,8 @@ Option names are case-insensitive. Unknown options are logged as a warning and i
 | `priority` | | `Low` or `High` ([priority-based execution](https://learn.microsoft.com/azure/cosmos-db/priority-based-execution)). `Low` lets OLTP traffic win under contention. |
 | `throughput_bucket` | | Throughput bucket (1 to 5) for every request, to cap this workload at the share of the container's RU/s that the bucket is configured for ([throughput buckets](https://learn.microsoft.com/azure/cosmos-db/throughput-buckets)) |
 | `target_ru_per_second` | | RU budget of one read (or one micro-batch): every task waits after a page as long as needed to keep the read at or below it. See [Throughput control](#throughput-control). |
-| `connection_timeout_seconds` | SDK default | HTTP request timeout |
-| `read_timeout_seconds` | SDK default | Socket read timeout |
+| `connection_timeout_seconds` | SDK default | HTTP request timeout, in seconds (fractions allowed, like every `*_seconds` option) |
+| `read_timeout_seconds` | SDK default (65) | Socket read timeout, in seconds |
 | `tls_ca_bundle` | system CAs | Path of a PEM file with the CA certificates to verify the endpoint with, e.g. behind a TLS-inspecting proxy or for an emulator certificate; the file must exist on every Spark node |
 | `tls_verify` | `true` | `false` turns certificate verification off (a WARNING is logged). azure-cosmos does not verify `localhost` and `127.0.0.1` anyway. |
 | `throttle_max_retries` | `9` | SDK retries on HTTP 429; `0` disables them, so 429s go straight to the retry layer of `max_retries` |
@@ -311,9 +326,11 @@ events = read_many(wanted, id_column="id", pk_column="deviceId", **conn, contain
 - Measured on an account (1M documents, 7 physical partitions): one logical partition of 50
   documents cost 4.3 RU as one task; 1,000 `item_ids` cost 301 RU. A query scoped by the key's
   EPK range instead (`feed_range_from_partition_key`) scans the whole physical partition: 2,386 RU.
-- `read_many` returns the batch-read schema or `schema=` (a `StructType` or DDL), runs as a
-  `mapInArrow` over the identities (which needs pandas, as Spark's `mapInArrow` does), and reads up
-  to 1,000 identities per request. Repeated identities are read once per Arrow batch.
+- `read_many` takes the connection and conversion options (`mode`, `raw_json_column`,
+  `corrupt_record_column`) and rejects the others. It returns the batch-read schema or `schema=`
+  (a `StructType` or DDL), runs as a `mapInArrow` over the identities (which needs pandas, as
+  Spark's `mapInArrow` does), and reads up to 1,000 identities per request. Repeated identities
+  are read once per Arrow batch.
 - A prefix of a hierarchical key can span several physical partitions; the service then scans
   them.
 
@@ -333,7 +350,8 @@ events = read_many(wanted, id_column="id", pk_column="deviceId", **conn, contain
 | `batch_checkpoint_location` | | Batch reads only: continue from the last committed read; see [Change feed as a batch read](#change-feed-as-a-batch-read) |
 | `mode`, `raw_json_column`, `corrupt_record_column`, `log_metrics` | as above | |
 
-`query` is rejected for change-feed streams; filter the stream in Spark.
+`query` and `query_parameters` are rejected for change-feed reads, streams and batch reads alike;
+filter the rows in Spark.
 
 ### Snapshot streams
 

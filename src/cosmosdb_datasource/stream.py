@@ -170,8 +170,8 @@ class CosmosStreamReader(CosmosReaderBase, DataSourceStreamReader, _AvailableNow
         super().__init__(opts, schema, stream=True)
         if opts.query_explicit:
             raise CosmosConfigError(
-                "Option 'query' is not supported for streaming reads: the change feed cannot be filtered "
-                "server-side. Filter the stream in Spark instead."
+                "Option 'query' does not apply to change-feed reads (streams, and spark.read with change-feed "
+                "options): the change feed cannot be filtered server-side. Filter the rows in Spark instead."
             )
         self._known: Offset | None = None
         self._initial: Offset | None = None

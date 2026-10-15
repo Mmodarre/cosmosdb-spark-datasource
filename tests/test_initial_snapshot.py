@@ -625,7 +625,7 @@ def test_initial_snapshot_options(make_store) -> None:
     assert stream.schema() == change_feed_schema()
     assert stream._opts.initial_snapshot and stream._opts.initial_snapshot_delay_seconds == 5.0
     assert not make_source(fake_options(store, change_feed_mode=AVAD))._opts.initial_snapshot
-    with pytest.raises(CosmosConfigError, match="not supported for streaming"):
+    with pytest.raises(CosmosConfigError, match="does not apply to change-feed reads"):
         q = make_source(fake_options(store, initial_snapshot="true", query="SELECT * FROM c WHERE c.v > 1"))
         q.streamReader(q.schema())
 
