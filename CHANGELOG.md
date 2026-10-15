@@ -63,6 +63,11 @@ First public release.
   (dedicated and standard access mode), serverless environment version 2 and later, and Lakeflow
   Spark Declarative Pipelines; `azure-cosmos` 4.14.0 to the latest 4.x.
 
+### Fixed
+
+- `read_many` with the same column as `id_column` and `pk_column`, as for a container partitioned on
+  `/id`, failed with `DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT` before reading anything.
+
 ### Known limitations
 
 - Read-only: there is no writer.

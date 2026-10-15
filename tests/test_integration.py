@@ -171,7 +171,9 @@ class _RetryingContainer:
 
 
 @contextlib.contextmanager
-def temporary_container(db: Any, *, version: int = 2, throughput: int | None = None) -> Iterator[tuple[str, Any]]:
+def temporary_container(
+    db: Any, *, version: int = 2, throughput: int | None = None, path: str = "/pk"
+) -> Iterator[tuple[str, Any]]:
     from azure.cosmos import PartitionKey
     from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
@@ -183,7 +185,7 @@ def temporary_container(db: Any, *, version: int = 2, throughput: int | None = N
                 # Idempotent: a client-side timeout may still have created the container.
                 container = db.create_container_if_not_exists(
                     name,
-                    partition_key=PartitionKey(path="/pk", kind="Hash", version=version),
+                    partition_key=PartitionKey(path=path, kind="Hash", version=version),
                     **({"offer_throughput": throughput} if throughput else {}),
                 )
                 break
@@ -371,22 +373,45 @@ def test_partition_key_item_ids_and_read_many_function(seeded) -> None:
     rows, _ = run_batch(options(name, item_ids=json.dumps(ids)))
     assert sorted(r[0] for r in rows) == sorted(f"d{i}" for i in range(0, n, 7))
 
-    class Frame:
-        def __getitem__(self, column: str) -> str:
-            return column
-
-        def select(self, *columns: str) -> Any:
-            return self
-
-        def dropDuplicates(self) -> Any:
-            return self
-
-        def mapInArrow(self, fn: Any, schema: Any) -> Any:
-            return fn
-
-    read = readmany.read_many(Frame(), schema=StructType([StructField("id", StringType())]), **options(name))
+    read = readmany.read_many(_Identities(), schema=StructType([StructField("id", StringType())]), **options(name))
     batch = pa.RecordBatch.from_pydict({"id": ["d5", "d6", "nope"], "pk": ["p5", "p6", "p1"]})
     assert sorted(pa.Table.from_batches(list(read(iter([batch])))).column("id").to_pylist()) == ["d5", "d6"]
+
+
+class _Identities:
+    """A stand-in DataFrame of identities: read_many returns its mapInArrow function, applied to one batch."""
+
+    class _Column:
+        def alias(self, name: str) -> Any:
+            return self
+
+    def __getitem__(self, column: str) -> Any:
+        return self._Column()
+
+    def select(self, *columns: Any) -> Any:
+        return self
+
+    def dropDuplicates(self) -> Any:
+        return self
+
+    def mapInArrow(self, fn: Any, schema: Any) -> Any:
+        return fn
+
+
+def test_read_many_on_a_container_partitioned_on_id(sdk_db) -> None:
+    import pyarrow as pa
+
+    from cosmosdb_datasource import readmany
+
+    with temporary_container(sdk_db, path="/id") as (name, container):
+        for doc_id in ("a", "b", "c"):
+            container.upsert_item({"id": doc_id, "v": doc_id.upper()})
+        schema = StructType([StructField("id", StringType()), StructField("pk", StringType())])
+        read = readmany.read_many(_Identities(), id_column="id", pk_column="id", schema=schema, **options(name))
+        ids = ["a", "c", "missing"]
+        batch = pa.RecordBatch.from_pydict({"id": ids, "pk": ids})  # one input column, selected twice
+        rows = pa.Table.from_batches(list(read(iter([batch])))).to_pylist()
+        assert sorted((r["id"], r["pk"]) for r in rows) == [("a", "a"), ("c", "c")]
 
 
 def test_change_feed_batch_read_with_a_checkpoint(make_container, tmp_path: Path) -> None:

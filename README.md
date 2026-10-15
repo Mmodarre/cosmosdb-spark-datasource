@@ -352,6 +352,8 @@ wanted = spark.table("lookups").select("id", "deviceId")  # the key in its JSON 
 events = read_many(wanted, id_column="id", pk_column="deviceId", **conn, container="events")
 ```
 
+For a container partitioned on `/id`, pass the same column as both: `id_column="id", pk_column="id"`.
+
 - With [filter pushdown](#filter-pushdown), `pk = 'v'` and `pk IN (...)` with string keys read only
   those logical partitions, the same way.
 - Measured on an account (1M documents, 7 physical partitions): one logical partition of 50
